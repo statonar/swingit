@@ -54,6 +54,17 @@ with st.sidebar:
     st.divider()
     st.markdown("#### RSI (14-day)")
     rsi_min, rsi_max = st.slider("RSI range", 0, 100, (0, 100))
+    rsi_recovery_target = st.select_slider(
+        "RSI recovery target",
+        options=[45, 50, 55, 60, 65, 70],
+        value=50,
+        help="Score oversold events by how often RSI recovered to this level. 50 is neutral momentum; 60 is a stronger rebound; 70 is overbought and much stricter."
+    )
+    rsi_bounce_window = st.slider(
+        "Max bounce window after RSI <30",
+        min_value=5, max_value=60, value=30, step=5,
+        help="Measures the biggest closing-price bounce within this many trading days after the RSI oversold low."
+    )
 
     st.divider()
     st.markdown("#### Moving Averages")
@@ -121,33 +132,32 @@ def get_universe_tickers(universe, custom_input=""):
 # ── RSI Recovery Analysis
 
 
-def analyze_rsi_recoveries(close, rsi_series, oversold_level=30, recovery_level=30):
+def analyze_rsi_recoveries(close, rsi_series, oversold_level=30, recovery_level=50, bounce_window=30):
     """
-    Find RSI oversold events in the last year and measure how each one recovered.
+    Find RSI oversold events in the last year and measure what happened next.
 
     Event definition:
     - Starts when RSI falls below oversold_level.
     - A single event can last multiple days while RSI stays below oversold_level.
     - The recovery clock starts at the lowest closing price during that oversold event.
-    - Recovery occurs when RSI closes back at or above recovery_level.
-    - Recovery gain is measured from the oversold-event low close to the recovery close.
+    - RSI target recovery occurs when RSI closes back at or above recovery_level.
+    - Target gain is measured from the oversold-event low close to the target-recovery close.
+    - Max bounce is the best closing-price gain within bounce_window trading days after the low.
     """
+    empty = {
+        "events": [], "event_count": 0, "target_recovered_count": 0,
+        "target_recovery_rate": None, "avg_target_recovery_days": None,
+        "median_target_recovery_days": None, "avg_target_gain_pct": None,
+        "avg_max_bounce_pct": None, "median_max_bounce_pct": None,
+        "rsi_recovery_score": 50, "rsi_recovery_note": "No RSI data"
+    }
+
     if close is None or rsi_series is None or len(close) == 0 or len(rsi_series) == 0:
-        return {
-            "events": [], "event_count": 0, "recovered_count": 0,
-            "recovery_rate": None, "avg_recovery_days": None,
-            "median_recovery_days": None, "avg_recovery_gain_pct": None,
-            "rsi_recovery_score": 50, "rsi_recovery_note": "No RSI data"
-        }
+        return empty
 
     data = pd.DataFrame({"close": close, "rsi": rsi_series}).dropna()
     if data.empty:
-        return {
-            "events": [], "event_count": 0, "recovered_count": 0,
-            "recovery_rate": None, "avg_recovery_days": None,
-            "median_recovery_days": None, "avg_recovery_gain_pct": None,
-            "rsi_recovery_score": 50, "rsi_recovery_note": "No RSI data"
-        }
+        return empty
 
     events = []
     i = 0
@@ -166,53 +176,64 @@ def analyze_rsi_recoveries(close, rsi_series, oversold_level=30, recovery_level=
             trough_pos = data.index.get_loc(trough_date)
             trough_close = float(data.loc[trough_date, "close"])
 
-            recovery_pos = None
-            recovery_date = None
-            recovery_close = None
+            target_pos = None
+            target_date = None
+            target_close = None
 
+            # Search after the oversold period for RSI recovering to the chosen target.
             for j in range(event_end_pos + 1, n):
                 if data["rsi"].iloc[j] >= recovery_level:
-                    recovery_pos = j
-                    recovery_date = data.index[j]
-                    recovery_close = float(data["close"].iloc[j])
+                    target_pos = j
+                    target_date = data.index[j]
+                    target_close = float(data["close"].iloc[j])
                     break
 
-            recovered = recovery_pos is not None
-            days_to_recover = int(recovery_pos - trough_pos) if recovered else None
-            gain_pct = ((recovery_close / trough_close) - 1) * 100 if recovered and trough_close else None
+            target_recovered = target_pos is not None
+            days_to_target = int(target_pos - trough_pos) if target_recovered else None
+            target_gain_pct = ((target_close / trough_close) - 1) * 100 if target_recovered and trough_close else None
+
+            # Find the best closing-price bounce after the RSI low, even if RSI did not reach target.
+            max_end_pos = min(n - 1, trough_pos + int(bounce_window))
+            bounce_slice = data.iloc[trough_pos:max_end_pos + 1]
+            max_bounce_date = bounce_slice["close"].idxmax()
+            max_bounce_pos = data.index.get_loc(max_bounce_date)
+            max_bounce_close = float(data.loc[max_bounce_date, "close"])
+            max_bounce_pct = ((max_bounce_close / trough_close) - 1) * 100 if trough_close else None
+            days_to_max_bounce = int(max_bounce_pos - trough_pos)
 
             events.append({
                 "Start Date": data.index[event_start_pos].date(),
                 "RSI Low Date": trough_date.date(),
-                "Recovery Date": recovery_date.date() if recovered else None,
+                "Target Date": target_date.date() if target_recovered else None,
                 "Start RSI": round(float(data["rsi"].iloc[event_start_pos]), 1),
                 "Lowest RSI": round(float(event_slice["rsi"].min()), 1),
                 "Low Close": round(trough_close, 2),
-                "Recovery Close": round(recovery_close, 2) if recovered else None,
-                "Days to Recover": days_to_recover,
-                "Recovery Gain %": round(gain_pct, 2) if gain_pct is not None else None,
-                "Recovered": recovered,
+                "Target Close": round(target_close, 2) if target_recovered else None,
+                "Days to Target": days_to_target,
+                "Gain to Target %": round(target_gain_pct, 2) if target_gain_pct is not None else None,
+                "Hit Target": target_recovered,
+                f"Max {bounce_window}D Bounce Date": max_bounce_date.date(),
+                f"Max {bounce_window}D Bounce Close": round(max_bounce_close, 2),
+                f"Days to Max {bounce_window}D Bounce": days_to_max_bounce,
+                f"Max {bounce_window}D Bounce %": round(max_bounce_pct, 2) if max_bounce_pct is not None else None,
             })
         i += 1
 
     event_count = len(events)
-    recovered_events = [e for e in events if e["Recovered"]]
-    recovered_count = len(recovered_events)
+    target_events = [e for e in events if e["Hit Target"]]
+    target_recovered_count = len(target_events)
 
     if event_count == 0:
-        return {
-            "events": events, "event_count": 0, "recovered_count": 0,
-            "recovery_rate": None, "avg_recovery_days": None,
-            "median_recovery_days": None, "avg_recovery_gain_pct": None,
-            "rsi_recovery_score": 50,
+        empty.update({
             "rsi_recovery_note": "No RSI < 30 events in the past year"
-        }
+        })
+        return empty
 
-    recovery_rate = recovered_count / event_count * 100
+    target_recovery_rate = target_recovered_count / event_count * 100
 
-    if recovered_events:
-        days = pd.Series([e["Days to Recover"] for e in recovered_events])
-        gains = pd.Series([e["Recovery Gain %"] for e in recovered_events])
+    if target_events:
+        days = pd.Series([e["Days to Target"] for e in target_events])
+        gains = pd.Series([e["Gain to Target %"] for e in target_events])
         avg_days = float(days.mean())
         median_days = float(days.median())
         avg_gain = float(gains.mean())
@@ -221,7 +242,11 @@ def analyze_rsi_recoveries(close, rsi_series, oversold_level=30, recovery_level=
         median_days = None
         avg_gain = None
 
-    # Scoring: recovery rate matters most, then speed, then average bounce size, then sample size.
+    max_bounces = pd.Series([e[f"Max {bounce_window}D Bounce %"] for e in events if e.get(f"Max {bounce_window}D Bounce %") is not None])
+    avg_max_bounce = float(max_bounces.mean()) if not max_bounces.empty else None
+    median_max_bounce = float(max_bounces.median()) if not max_bounces.empty else None
+
+    # Scoring: target recovery rate matters most, then speed, then actual bounce size, then sample size.
     if avg_days is None:
         speed_score = 0
     elif avg_days <= 3:
@@ -235,28 +260,30 @@ def analyze_rsi_recoveries(close, rsi_series, oversold_level=30, recovery_level=
     else:
         speed_score = 20
 
-    gain_score = 0 if avg_gain is None else max(0, min(100, (avg_gain / 15) * 100))
+    bounce_score = 0 if avg_max_bounce is None else max(0, min(100, (avg_max_bounce / 15) * 100))
     sample_score = min(event_count, 5) / 5 * 100
 
-    score = (0.45 * recovery_rate) + (0.30 * speed_score) + (0.20 * gain_score) + (0.05 * sample_score)
+    score = (0.40 * target_recovery_rate) + (0.25 * speed_score) + (0.25 * bounce_score) + (0.10 * sample_score)
 
-    if recovery_rate >= 80 and avg_days is not None and avg_days <= 7:
-        note = "Strong historical RSI rebound pattern"
-    elif recovery_rate >= 60 and avg_days is not None and avg_days <= 14:
-        note = "Decent historical RSI rebound pattern"
-    elif recovered_count == 0:
-        note = "Oversold events have not recovered yet"
+    if target_recovery_rate >= 80 and avg_days is not None and avg_days <= 7 and avg_max_bounce is not None and avg_max_bounce >= 8:
+        note = f"Strong RSI <30 rebound pattern to RSI {recovery_level}"
+    elif target_recovery_rate >= 60 and avg_days is not None and avg_days <= 14:
+        note = f"Decent RSI <30 rebound pattern to RSI {recovery_level}"
+    elif target_recovered_count == 0:
+        note = f"Oversold events have not reached RSI {recovery_level} yet"
     else:
-        note = "Mixed or slower RSI rebound pattern"
+        note = f"Mixed or slower RSI <30 rebound pattern to RSI {recovery_level}"
 
     return {
         "events": events,
         "event_count": event_count,
-        "recovered_count": recovered_count,
-        "recovery_rate": round(recovery_rate, 1),
-        "avg_recovery_days": round(avg_days, 1) if avg_days is not None else None,
-        "median_recovery_days": round(median_days, 1) if median_days is not None else None,
-        "avg_recovery_gain_pct": round(avg_gain, 2) if avg_gain is not None else None,
+        "target_recovered_count": target_recovered_count,
+        "target_recovery_rate": round(target_recovery_rate, 1),
+        "avg_target_recovery_days": round(avg_days, 1) if avg_days is not None else None,
+        "median_target_recovery_days": round(median_days, 1) if median_days is not None else None,
+        "avg_target_gain_pct": round(avg_gain, 2) if avg_gain is not None else None,
+        "avg_max_bounce_pct": round(avg_max_bounce, 2) if avg_max_bounce is not None else None,
+        "median_max_bounce_pct": round(median_max_bounce, 2) if median_max_bounce is not None else None,
         "rsi_recovery_score": int(round(score)),
         "rsi_recovery_note": note,
     }
@@ -274,7 +301,7 @@ def compute_technicals(ticker):
 
         rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
         rsi = float(rsi_series.iloc[-1]) if rsi_series is not None else None
-        rsi_recovery = analyze_rsi_recoveries(close, rsi_series, oversold_level=30, recovery_level=30)
+        rsi_recovery = analyze_rsi_recoveries(close, rsi_series, oversold_level=30, recovery_level=rsi_recovery_target, bounce_window=rsi_bounce_window)
 
         sma50_series = ta.trend.SMAIndicator(close, window=50).sma_indicator()
         sma200_series = ta.trend.SMAIndicator(close, window=200).sma_indicator()
@@ -302,13 +329,15 @@ def compute_technicals(ticker):
             "avg_vol": int(avg_vol),
             "rsi": round(rsi, 1) if rsi else None,
             "rsi_events": rsi_recovery["event_count"],
-            "rsi_recovered_count": rsi_recovery["recovered_count"],
-            "rsi_recovery_rate": rsi_recovery["recovery_rate"],
-            "rsi_avg_recovery_days": rsi_recovery["avg_recovery_days"],
-            "rsi_median_recovery_days": rsi_recovery["median_recovery_days"],
-            "rsi_avg_recovery_gain_pct": rsi_recovery["avg_recovery_gain_pct"],
+            "rsi_target_recovered_count": rsi_recovery["target_recovered_count"],
+            "rsi_target_recovery_rate": rsi_recovery["target_recovery_rate"],
+            "rsi_avg_target_recovery_days": rsi_recovery["avg_target_recovery_days"],
+            "rsi_median_target_recovery_days": rsi_recovery["median_target_recovery_days"],
+            "rsi_avg_target_gain_pct": rsi_recovery["avg_target_gain_pct"],
             "rsi_recovery_score": rsi_recovery["rsi_recovery_score"],
             "rsi_recovery_note": rsi_recovery["rsi_recovery_note"],
+            "rsi_avg_max_bounce_pct": rsi_recovery["avg_max_bounce_pct"],
+            "rsi_median_max_bounce_pct": rsi_recovery["median_max_bounce_pct"],
             "rsi_recovery_events": rsi_recovery["events"],
             "sma50": round(sma50, 2) if sma50 else None,
             "sma200": round(sma200, 2) if sma200 else None,
@@ -390,7 +419,7 @@ def mini_chart(data):
 
 # ── Main
 st.markdown("## 📡 Signal Screener")
-st.markdown(f"Universe: **{universe}** · Price **${price_min}–${price_max}** · RSI **{rsi_min}–{rsi_max}** · MA **{ma_signal}** · MACD **{macd_signal}**")
+st.markdown(f"Universe: **{universe}** · Price **${price_min}–${price_max}** · RSI **{rsi_min}–{rsi_max}** · RSI target **{rsi_recovery_target}** · Bounce window **{rsi_bounce_window}D** · MA **{ma_signal}** · MACD **{macd_signal}**")
 st.divider()
 
 run_col, _ = st.columns([1, 5])
@@ -446,10 +475,11 @@ if run:
             "RSI (14)": r.get("rsi"),
             "RSI Recovery Score": r.get("rsi_recovery_score"),
             "RSI <30 Events": r.get("rsi_events"),
-            "Recovered": r.get("rsi_recovered_count"),
-            "Recovery Rate %": r.get("rsi_recovery_rate"),
-            "Avg Recovery Days": r.get("rsi_avg_recovery_days"),
-            "Avg Recovery Gain %": r.get("rsi_avg_recovery_gain_pct"),
+            f"Hit RSI {rsi_recovery_target}": r.get("rsi_target_recovered_count"),
+            f"RSI {rsi_recovery_target} Hit Rate %": r.get("rsi_target_recovery_rate"),
+            f"Avg Days to RSI {rsi_recovery_target}": r.get("rsi_avg_target_recovery_days"),
+            f"Avg Gain to RSI {rsi_recovery_target} %": r.get("rsi_avg_target_gain_pct"),
+            f"Avg Max {rsi_bounce_window}D Bounce %": r.get("rsi_avg_max_bounce_pct"),
             "SMA 50": r.get("sma50"),
             "SMA 200": r.get("sma200"),
             "MA Trend": ma_trend,
@@ -504,8 +534,9 @@ if run:
             "Price ($)": st.column_config.NumberColumn(format="$%.2f"),
             "RSI (14)": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
             "RSI Recovery Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
-            "Recovery Rate %": st.column_config.NumberColumn(format="%.1f%%"),
-            "Avg Recovery Gain %": st.column_config.NumberColumn(format="%.2f%%"),
+            f"RSI {rsi_recovery_target} Hit Rate %": st.column_config.NumberColumn(format="%.1f%%"),
+            f"Avg Gain to RSI {rsi_recovery_target} %": st.column_config.NumberColumn(format="%.2f%%"),
+            f"Avg Max {rsi_bounce_window}D Bounce %": st.column_config.NumberColumn(format="%.2f%%"),
         }
     )
 
@@ -523,15 +554,15 @@ if run:
         ra, rb, rc, rd = st.columns(4)
         ra.metric("RSI Recovery Score", f"{detail.get('rsi_recovery_score', '—')}/100")
         rb.metric("RSI <30 Events", detail.get("rsi_events", "—"))
-        rc.metric("Avg Recovery Days", detail.get("rsi_avg_recovery_days", "—"))
-        avg_gain = detail.get("rsi_avg_recovery_gain_pct")
-        rd.metric("Avg Recovery Gain", f"{avg_gain}%" if avg_gain is not None else "—")
+        rc.metric(f"Avg Days to RSI {rsi_recovery_target}", detail.get("rsi_avg_target_recovery_days", "—"))
+        avg_bounce = detail.get("rsi_avg_max_bounce_pct")
+        rd.metric(f"Avg Max {rsi_bounce_window}D Bounce", f"{avg_bounce}%" if avg_bounce is not None else "—")
 
         st.caption(detail.get("rsi_recovery_note", ""))
         st.markdown(signal_pills(detail), unsafe_allow_html=True)
         st.plotly_chart(mini_chart(detail), use_container_width=True)
 
-        st.markdown("#### RSI <30 Recovery History")
+        st.markdown(f"#### RSI <30 Pattern History — Target RSI {rsi_recovery_target}")
         rsi_events = detail.get("rsi_recovery_events", [])
         if rsi_events:
             st.dataframe(pd.DataFrame(rsi_events), use_container_width=True, hide_index=True)
