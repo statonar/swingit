@@ -1,9 +1,6 @@
 """
-Stock Screener — US Equities (NYSE/NASDAQ)
-Technical screening via Finviz + yfinance for indicator calculation.
-
-Dependencies:
-    pip install streamlit finviz yfinance pandas ta requests plotly
+Signal Screener — US Equities (NYSE/NASDAQ)
+Pulls tickers directly from Finviz via HTTP, computes technicals with yfinance + ta.
 """
 
 import streamlit as st
@@ -13,7 +10,7 @@ import ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
-from finviz.screener import Screen
+from bs4 import BeautifulSoup
 import datetime
 
 st.set_page_config(page_title="Signal Screener", page_icon="📡", layout="wide", initial_sidebar_state="expanded")
@@ -36,12 +33,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ── Sidebar
 with st.sidebar:
     st.markdown("## 📡 Signal Screener")
     st.markdown("*US Equities — Technical*")
     st.divider()
     st.markdown("#### Exchange")
-    exchange_choice = st.multiselect("Select exchanges", ["NYSE", "NASDAQ", "AMEX"], default=["NYSE", "NASDAQ"], label_visibility="collapsed")
+    exchange_choice = st.multiselect("Exchanges", ["NYSE", "NASDAQ", "AMEX"], default=["NYSE", "NASDAQ"], label_visibility="collapsed")
     st.divider()
     st.markdown("#### Price & Volume")
     price_min, price_max = st.slider("Price range ($)", 1, 2000, (5, 500))
@@ -57,31 +55,62 @@ with st.sidebar:
     macd_signal = st.selectbox("MACD signal line cross", ["Any", "Bullish cross", "Bearish cross"])
     st.divider()
     max_results = st.slider("Max tickers to screen", 10, 200, 50, step=10)
-    st.markdown("<span class='pill'>Finviz → yfinance pipeline</span>", unsafe_allow_html=True)
 
-EXCHANGE_MAP = {"NYSE": "nyse", "NASDAQ": "nasdaq", "AMEX": "amex"}
+# ── Finviz scraper (no library needed)
+EXCHANGE_FILTER = {"NYSE": "exch_nyse", "NASDAQ": "exch_nasd", "AMEX": "exch_amex"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_finviz_tickers(exchanges, price_min, price_max, vol_min, limit):
-    try:
-        filters = [f"exch_{EXCHANGE_MAP.get(ex, 'nyse')}" for ex in exchanges]
-        screen = Screen.init_from_filters(filters=filters, order="price")
-        tickers = screen.get_ticker_details()
-        result = []
-        for row in tickers:
-            try:
-                price = float(row.get("Price", 0) or 0)
-                vol = int((row.get("Volume") or "0").replace(",", "").replace("-", "0"))
-                if price_min <= price <= price_max and vol >= vol_min:
-                    result.append(row["Ticker"])
-                    if len(result) >= limit:
-                        break
-            except Exception:
-                continue
-        return result
-    except Exception as e:
-        st.error(f"Finviz fetch error: {e}")
-        return []
+    """Scrape Finviz screener for tickers matching exchange + price + volume."""
+    exch_filters = "%2C".join(EXCHANGE_FILTER[e] for e in exchanges if e in EXCHANGE_FILTER)
+    tickers = []
+    row_offset = 1
+
+    while len(tickers) < limit:
+        url = (
+            f"https://finviz.com/screener.ashx?v=111"
+            f"&f={exch_filters}"
+            f"&r={row_offset}"
+        )
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Finviz screener table has id="screener-views-table" or rows with ticker links
+            rows = soup.select("tr.styled-row, tr[class*='screener']")
+            if not rows:
+                # fallback: find all links that look like ticker cells
+                rows = soup.select("table#screener-views-table tr")
+
+            found_any = False
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) < 10:
+                    continue
+                try:
+                    ticker = cells[1].get_text(strip=True)
+                    price_text = cells[8].get_text(strip=True).replace(",", "")
+                    vol_text = cells[9].get_text(strip=True).replace(",", "").replace("-", "0")
+                    price = float(price_text)
+                    vol = int(vol_text) if vol_text.isdigit() else 0
+                    if price_min <= price <= price_max and vol >= vol_min and ticker.isalpha():
+                        tickers.append(ticker)
+                        found_any = True
+                        if len(tickers) >= limit:
+                            break
+                except Exception:
+                    continue
+
+            if not found_any:
+                break
+            row_offset += 20
+
+        except Exception as e:
+            st.error(f"Finviz scrape error: {e}")
+            break
+
+    return tickers[:limit]
 
 @st.cache_data(ttl=300, show_spinner=False)
 def compute_technicals(ticker):
@@ -107,18 +136,14 @@ def compute_technicals(ticker):
 
         macd_val = float(macd_line.iloc[-1])
         sig_val = float(signal_line.iloc[-1])
-        macd_prev = float(macd_line.iloc[-2])
-        sig_prev = float(signal_line.iloc[-2])
-
         macd_cross = (
-            "bullish" if macd_prev < sig_prev and macd_val > sig_val else
-            "bearish" if macd_prev > sig_prev and macd_val < sig_val else
+            "bullish" if float(macd_line.iloc[-2]) < float(signal_line.iloc[-2]) and macd_val > sig_val else
+            "bearish" if float(macd_line.iloc[-2]) > float(signal_line.iloc[-2]) and macd_val < sig_val else
             "none"
         )
 
-        price = float(close.iloc[-1])
         return {
-            "ticker": ticker, "price": round(price, 2),
+            "ticker": ticker, "price": round(float(close.iloc[-1]), 2),
             "rsi": round(rsi, 1) if rsi else None,
             "sma50": round(sma50, 2) if sma50 else None,
             "sma200": round(sma200, 2) if sma200 else None,
@@ -132,8 +157,7 @@ def compute_technicals(ticker):
 
 def passes_filters(row):
     rsi = row.get("rsi")
-    if rsi and not (rsi_min <= rsi <= rsi_max):
-        return False
+    if rsi and not (rsi_min <= rsi <= rsi_max): return False
     price, sma50, sma200 = row.get("price", 0), row.get("sma50"), row.get("sma200")
     if ma_signal == "Bullish (50 > 200)" and not (sma50 and sma200 and sma50 > sma200): return False
     if ma_signal == "Bearish (50 < 200)" and not (sma50 and sma200 and sma50 < sma200): return False
@@ -162,8 +186,12 @@ def mini_chart(data):
     df = data["df"].copy()
     close = df["Close"].squeeze()
     dates = df.index
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55, 0.22, 0.23], vertical_spacing=0.04, subplot_titles=("Price + MAs", "RSI (14)", "MACD"))
-    fig.add_trace(go.Candlestick(x=dates, open=df["Open"].squeeze(), high=df["High"].squeeze(), low=df["Low"].squeeze(), close=close, name="Price", increasing_fillcolor="#3fb950", decreasing_fillcolor="#f85149", increasing_line_color="#3fb950", decreasing_line_color="#f85149"), row=1, col=1)
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55, 0.22, 0.23],
+                        vertical_spacing=0.04, subplot_titles=("Price + MAs", "RSI (14)", "MACD"))
+    fig.add_trace(go.Candlestick(x=dates, open=df["Open"].squeeze(), high=df["High"].squeeze(),
+        low=df["Low"].squeeze(), close=close, name="Price",
+        increasing_fillcolor="#3fb950", decreasing_fillcolor="#f85149",
+        increasing_line_color="#3fb950", decreasing_line_color="#f85149"), row=1, col=1)
     if data.get("sma50_series") is not None:
         fig.add_trace(go.Scatter(x=dates, y=data["sma50_series"], line=dict(color="#58a6ff", width=1.5), name="SMA 50"), row=1, col=1)
     if data.get("sma200_series") is not None:
@@ -174,18 +202,21 @@ def mini_chart(data):
         fig.add_hline(y=30, line=dict(color="#3fb950", dash="dot", width=1), row=2, col=1)
     hist = data.get("macd_hist")
     if hist is not None:
-        colors = ["#3fb950" if v >= 0 else "#f85149" for v in hist]
-        fig.add_trace(go.Bar(x=dates, y=hist, marker_color=colors, name="Histogram", opacity=0.7), row=3, col=1)
+        fig.add_trace(go.Bar(x=dates, y=hist, marker_color=["#3fb950" if v >= 0 else "#f85149" for v in hist], name="Histogram", opacity=0.7), row=3, col=1)
     if data.get("macd_line_series") is not None:
         fig.add_trace(go.Scatter(x=dates, y=data["macd_line_series"], line=dict(color="#58a6ff", width=1.5), name="MACD"), row=3, col=1)
     if data.get("macd_signal_series") is not None:
         fig.add_trace(go.Scatter(x=dates, y=data["macd_signal_series"], line=dict(color="#e3b341", width=1.5), name="Signal"), row=3, col=1)
-    fig.update_layout(height=520, paper_bgcolor="#0d1117", plot_bgcolor="#0d1117", font=dict(color="#8b949e", size=11), xaxis_rangeslider_visible=False, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10), bgcolor="rgba(0,0,0,0)"), margin=dict(l=8, r=8, t=32, b=8))
+    fig.update_layout(height=520, paper_bgcolor="#0d1117", plot_bgcolor="#0d1117",
+        font=dict(color="#8b949e", size=11), xaxis_rangeslider_visible=False,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=8, r=8, t=32, b=8))
     for i in range(1, 4):
         fig.update_xaxes(gridcolor="#21262d", row=i, col=1)
         fig.update_yaxes(gridcolor="#21262d", row=i, col=1)
     return fig
 
+# ── Main
 st.markdown("## 📡 Signal Screener")
 st.markdown(f"Screening **{', '.join(exchange_choice)}** · Price **${price_min}–${price_max}** · RSI **{rsi_min}–{rsi_max}** · MA **{ma_signal}** · MACD **{macd_signal}**")
 st.divider()
@@ -197,10 +228,12 @@ with run_col:
 if run:
     with st.spinner("Fetching tickers from Finviz…"):
         tickers = fetch_finviz_tickers(exchange_choice, price_min, price_max, vol_min, max_results)
+
     if not tickers:
-        st.warning("No tickers returned. Try relaxing the filters.")
+        st.warning("No tickers returned from Finviz. Try relaxing the price/volume filters.")
         st.stop()
-    st.info(f"Pulled **{len(tickers)}** tickers from Finviz. Calculating technicals…")
+
+    st.info(f"Pulled **{len(tickers)}** tickers. Calculating technicals…")
     progress = st.progress(0)
     results = []
     for i, t in enumerate(tickers):
@@ -209,29 +242,36 @@ if run:
             results.append(data)
         progress.progress((i + 1) / len(tickers))
     progress.empty()
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Tickers Scanned", len(tickers))
     m2.metric("Passed Filters", len(results))
     m3.metric("Bullish MACD Cross", sum(1 for r in results if r.get("macd_cross") == "bullish"))
     m4.metric("Oversold RSI (<30)", sum(1 for r in results if r.get("rsi") and r["rsi"] < 30))
     st.divider()
+
     if not results:
         st.warning("No stocks matched your technical filters. Try widening the ranges.")
         st.stop()
+
     st.markdown("### Results")
     table_rows = []
     for r in results:
         sma50, sma200 = r.get("sma50"), r.get("sma200")
-        ma_trend = ("🟢 50 > 200" if sma50 and sma200 and sma50 > sma200 else "🔴 50 < 200" if sma50 and sma200 else "—")
+        ma_trend = "🟢 50 > 200" if sma50 and sma200 and sma50 > sma200 else "🔴 50 < 200" if sma50 and sma200 else "—"
         cross = r.get("macd_cross", "none")
         macd_label = "🟢 Bullish" if cross == "bullish" else ("🔴 Bearish" if cross == "bearish" else "—")
-        table_rows.append({"Ticker": r["ticker"], "Price ($)": r["price"], "RSI (14)": r.get("rsi"), "SMA 50": r.get("sma50"), "SMA 200": r.get("sma200"), "MA Trend": ma_trend, "MACD Cross": macd_label})
+        table_rows.append({"Ticker": r["ticker"], "Price ($)": r["price"], "RSI (14)": r.get("rsi"),
+                           "SMA 50": r.get("sma50"), "SMA 200": r.get("sma200"), "MA Trend": ma_trend, "MACD Cross": macd_label})
+
     df_results = pd.DataFrame(table_rows)
-    st.dataframe(df_results, use_container_width=True, hide_index=True, column_config={"Price ($)": st.column_config.NumberColumn(format="$%.2f"), "RSI (14)": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f")})
+    st.dataframe(df_results, use_container_width=True, hide_index=True,
+        column_config={"Price ($)": st.column_config.NumberColumn(format="$%.2f"),
+                       "RSI (14)": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f")})
+
     st.divider()
     st.markdown("### Chart Detail")
-    tickers_available = [r["ticker"] for r in results]
-    selected = st.selectbox("Select a ticker to inspect", tickers_available)
+    selected = st.selectbox("Select a ticker to inspect", [r["ticker"] for r in results])
     detail = next((r for r in results if r["ticker"] == selected), None)
     if detail:
         ca, cb, cc, cd = st.columns(4)
@@ -241,6 +281,7 @@ if run:
         cd.metric("SMA 200", f"${detail.get('sma200', '—')}")
         st.markdown(signal_pills(detail), unsafe_allow_html=True)
         st.plotly_chart(mini_chart(detail), use_container_width=True)
+
     st.divider()
     csv = df_results.drop(columns=["MA Trend", "MACD Cross"]).to_csv(index=False)
     st.download_button("⬇ Export Results CSV", data=csv, file_name=f"screener_{datetime.date.today()}.csv", mime="text/csv")
