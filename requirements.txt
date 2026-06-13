@@ -5,3 +5,4 @@ ta
 plotly
 requests
 lxml
+html5lib
