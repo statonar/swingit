@@ -67,7 +67,16 @@ with st.sidebar:
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_sp500():
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    df = pd.read_html(url)[0]
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    response = requests.get(url, headers=headers, timeout=15)
+    response.raise_for_status()
+
+    tables = pd.read_html(StringIO(response.text))
+    df = tables[0]
+
     return df["Symbol"].str.replace(".", "-", regex=False).tolist()
 
 @st.cache_data(ttl=86400, show_spinner=False)
