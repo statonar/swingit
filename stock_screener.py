@@ -34,6 +34,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Sidebar
+custom_input = ""
+
 with st.sidebar:
     st.markdown("## 📡 Signal Screener")
     st.markdown("*US Equities — Technical*")
@@ -83,12 +85,19 @@ def get_sp500():
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_nasdaq100():
     url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-    tables = pd.read_html(url)
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    response = requests.get(url, headers=headers, timeout=15)
+    response.raise_for_status()
+
+    tables = pd.read_html(StringIO(response.text))
     for t in tables:
         if "Ticker" in t.columns:
-            return t["Ticker"].tolist()
+            return t["Ticker"].astype(str).str.replace(".", "-", regex=False).tolist()
         if "Symbol" in t.columns:
-            return t["Symbol"].tolist()
+            return t["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
     return []
 
 DOW30 = [
@@ -285,15 +294,58 @@ if run:
         })
 
     df_results = pd.DataFrame(table_rows)
-    st.dataframe(df_results, use_container_width=True, hide_index=True,
+
+    st.markdown("#### Sort Results")
+    sort_col, sort_dir_col = st.columns([2, 1])
+
+    with sort_col:
+        sort_by = st.selectbox(
+            "Sort by",
+            options=df_results.columns.tolist(),
+            index=df_results.columns.tolist().index("Ticker")
+        )
+
+    with sort_dir_col:
+        sort_direction = st.selectbox(
+            "Direction",
+            options=["Ascending", "Descending"],
+            index=0
+        )
+
+    ascending = sort_direction == "Ascending"
+
+    # Create a sortable copy so formatted text columns still sort correctly.
+    df_sortable = df_results.copy()
+
+    if "Avg Vol" in df_sortable.columns:
+        df_sortable["Avg Vol Sort"] = (
+            df_sortable["Avg Vol"]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .astype(int)
+        )
+
+    sort_column_actual = "Avg Vol Sort" if sort_by == "Avg Vol" else sort_by
+
+    df_sorted = (
+        df_sortable
+        .sort_values(by=sort_column_actual, ascending=ascending, na_position="last")
+        .drop(columns=["Avg Vol Sort"], errors="ignore")
+    )
+
+    st.dataframe(
+        df_sorted,
+        use_container_width=True,
+        hide_index=True,
         column_config={
             "Price ($)": st.column_config.NumberColumn(format="$%.2f"),
             "RSI (14)": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
-        })
+        }
+    )
 
     st.divider()
     st.markdown("### Chart Detail")
-    selected = st.selectbox("Select a ticker to inspect", [r["ticker"] for r in results])
+    selected = st.selectbox("Select a ticker to inspect", df_sorted["Ticker"].tolist())
     detail = next((r for r in results if r["ticker"] == selected), None)
     if detail:
         ca, cb, cc, cd = st.columns(4)
@@ -305,7 +357,7 @@ if run:
         st.plotly_chart(mini_chart(detail), use_container_width=True)
 
     st.divider()
-    csv = df_results.drop(columns=["MA Trend", "MACD Cross"]).to_csv(index=False)
+    csv = df_sorted.drop(columns=["MA Trend", "MACD Cross"]).to_csv(index=False)
     st.download_button("⬇ Export Results CSV", data=csv, file_name=f"screener_{datetime.date.today()}.csv", mime="text/csv")
 
 else:
