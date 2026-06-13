@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import datetime
+from io import StringIO
 
 st.set_page_config(page_title="Signal Screener", page_icon="📡", layout="wide", initial_sidebar_state="expanded")
 
