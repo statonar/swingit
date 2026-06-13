@@ -4,4 +4,4 @@ pandas
 ta
 plotly
 requests
-finviz
+beautifulsoup4
