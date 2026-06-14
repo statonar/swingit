@@ -1,5 +1,5 @@
 """
-SwingIt V10 — Morning Report + Trading Terminal UI
+SwingIt V10.1 — Profiles + Morning Report + Trading Terminal UI
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -270,6 +270,16 @@ if "last_morning_report" not in st.session_state:
 custom_input = ""
 csv_uploaded = None
 
+PROFILE_OPTIONS = ["Amber", "Adam", "Shared"]
+
+def _profile_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "_", str(name).strip().lower()).strip("_") or "default"
+
+if "active_profile_name" not in st.session_state:
+    st.session_state.active_profile_name = "Amber"
+if "last_profile_name" not in st.session_state:
+    st.session_state.last_profile_name = st.session_state.active_profile_name
+
 UNIVERSE_OPTIONS = [
     "⭐ SwingIt Elite (Recommended)",
     "⭐ Favorites",
@@ -313,19 +323,32 @@ UNIVERSE_HINTS = {
 }
 
 with st.container(border=True):
-    top_title_col, top_universe_col, top_model_col, top_run_col = st.columns(
-        [1.35, 2.35, 1.65, 1.25],
+    top_title_col, top_profile_col, top_universe_col, top_model_col, top_run_col = st.columns(
+        [1.15, 0.85, 2.1, 1.55, 1.2],
         vertical_alignment="center",
     )
 
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V10</div>
+            <div class="terminal-title">🔥 SwingIt V10.1</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
         )
+
+    with top_profile_col:
+        st.markdown("<div class='toolbar-label'>Profile</div>", unsafe_allow_html=True)
+        active_profile = st.selectbox(
+            "Profile",
+            PROFILE_OPTIONS,
+            index=PROFILE_OPTIONS.index(st.session_state.active_profile_name) if st.session_state.active_profile_name in PROFILE_OPTIONS else 0,
+            label_visibility="collapsed",
+            help="Separate Favorites, Morning Reports, and saved settings for each person.",
+            key="top_profile",
+        )
+        st.session_state.active_profile_name = active_profile
+        st.markdown("<div class='toolbar-help'>Personal favorites + reports</div>", unsafe_allow_html=True)
 
     with top_universe_col:
         st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
@@ -397,13 +420,27 @@ elif universe == "📂 CSV upload":
         key="top_csv_upload",
     )
 
+# If the profile changes, clear displayed scan results so Amber and Adam don't accidentally
+# see each other's Favorites scan/Morning Report output.
+if st.session_state.last_profile_name != st.session_state.active_profile_name:
+    st.session_state.scan_results = None
+    st.session_state.scan_meta = None
+    st.session_state.last_morning_report = None
+    st.session_state.leaderboard_filter = "All"
+    st.session_state.last_profile_name = st.session_state.active_profile_name
+
+ACTIVE_PROFILE = st.session_state.active_profile_name
+PROFILE_SLUG = _profile_slug(ACTIVE_PROFILE)
+PROFILE_DIR = os.path.join("swingit_data", "profiles", PROFILE_SLUG)
+os.makedirs(PROFILE_DIR, exist_ok=True)
+
 st.markdown("---")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Favorites + uploaded universe helpers
 # ──────────────────────────────────────────────────────────────────────────────
-FAVORITES_FILE = "swingit_favorites.json"
+FAVORITES_FILE = os.path.join(PROFILE_DIR, "favorites.json")
 
 
 def _normalize_ticker(ticker: str) -> str:
@@ -437,7 +474,7 @@ def save_favorites(tickers: list[str]) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # Morning Report helpers — Zazu mode for Favorites
 # ──────────────────────────────────────────────────────────────────────────────
-MORNING_SNAPSHOT_FILE = "swingit_morning_snapshot.json"
+MORNING_SNAPSHOT_FILE = os.path.join(PROFILE_DIR, "morning_snapshot.json")
 
 
 def _to_float(value, default=None):
@@ -640,8 +677,8 @@ def _report_line(item: dict, category: str) -> str:
 
 def render_morning_report(report: dict, favorites_count: int, previous_snapshot: dict | None = None):
     previous_time = (previous_snapshot or {}).get("saved_at")
-    st.markdown("## ☕🦜 Morning Report")
-    st.caption("Favorites-first briefing: what changed, what is actionable, and what should be ignored for now.")
+    st.markdown(f"## ☕🦜 Morning Report for {html.escape(ACTIVE_PROFILE)}")
+    st.caption("Profile-specific Favorites briefing: what changed, what is actionable, and what should be ignored for now.")
     counts = {k: len(v) for k, v in (report or {}).items()}
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Favorites scanned", favorites_count)
@@ -3035,7 +3072,7 @@ if st.session_state.scan_results is None and not run:
     with st.container(border=True):
         st.markdown("### ☕🦜 Morning Report")
         st.markdown(
-            "Your Zazu-style Favorites briefing: overreaction panic alerts, ready-now candidates, new turns, and red flags."
+            f"Your Zazu-style Favorites briefing for {html.escape(ACTIVE_PROFILE)}: overreaction panic alerts, ready-now candidates, new turns, and red flags."
         )
         col_a, col_b = st.columns([1, 2])
         with col_a:
@@ -3043,9 +3080,9 @@ if st.session_state.scan_results is None and not run:
                 run_morning_report = True
         with col_b:
             if fav_count == 0:
-                st.warning("Add Favorites first, then Morning Report can watch them for changes.")
+                st.warning(f"Add Favorites for {ACTIVE_PROFILE} first, then Morning Report can watch them for changes.")
             else:
-                st.caption(f"Will scan {fav_count} Favorites and compare against your last Morning Report snapshot.")
+                st.caption(f"Will scan {fav_count} {ACTIVE_PROFILE} Favorites and compare against this profile’s last Morning Report snapshot.")
         st.markdown("---")
         st.markdown("### 📈 Custom Scan")
         st.caption("Use the toolbar above to choose a universe, model settings, and run a normal Swing Scan.")
@@ -3070,6 +3107,7 @@ if run or run_morning_report:
 
     tickers = all_tickers
     st.session_state.scan_meta = {
+        "profile": ACTIVE_PROFILE,
         "universe": scan_universe,
         "morning_report": bool(run_morning_report),
         "previous_morning_snapshot": previous_morning_snapshot,
@@ -3084,7 +3122,7 @@ if run or run_morning_report:
     }
 
     if run_morning_report:
-        st.info(f"☕🦜 Building Morning Report: scanning {len(tickers)} Favorites…")
+        st.info(f"☕🦜 Building Morning Report for {ACTIVE_PROFILE}: scanning {len(tickers)} Favorites…")
     else:
         st.info(f"Scanning full universe: {len(tickers)} tickers from {scan_universe}…")
     progress = st.progress(0)
@@ -3416,9 +3454,16 @@ st.dataframe(
 )
 
 
-with st.expander("⭐ Favorites Manager", expanded=False):
+with st.expander("👤 Profile Manager", expanded=False):
+    st.caption("Profiles keep Favorites and Morning Report history separate. Use Shared for a joint/family list.")
+    st.write(f"Current profile: **{ACTIVE_PROFILE}**")
+    st.write(f"Profile data folder: `{PROFILE_DIR}`")
+    st.info("Amber and Adam can now keep separate Favorites and separate Morning Report baselines.")
+
+
+with st.expander(f"⭐ Favorites Manager — {ACTIVE_PROFILE}", expanded=False):
     favs = load_favorites()
-    st.caption("Favorites are a saved universe. Choose ⭐ Favorites in the Universe menu to scan only these tickers.")
+    st.caption(f"Favorites are saved separately for {ACTIVE_PROFILE}. Choose ⭐ Favorites in the Universe menu to scan only these tickers.")
     st.write(", ".join(favs) if favs else "No favorites saved yet.")
     add_text = st.text_input("Add tickers to Favorites", placeholder="ORCL, ADBE, META", key="favorites_add_text")
     fav_a, fav_b, fav_c = st.columns([1, 1, 3])
