@@ -1,5 +1,5 @@
 """
-SwingIt V5.6.2 — RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V6 — Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V5.6.2",
+    page_title="SwingIt V6",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -198,14 +198,31 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V5.6.1")
+    st.markdown("## 🔥 SwingIt V6")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
     universe = st.selectbox(
         "Universe",
-        ["S&P 500", "NASDAQ 100", "Dow Jones 30", "Custom list"],
-        help="Choose the stock universe to rank. The app ranks candidates rather than filtering them out."
+        [
+            "⭐ SwingIt Elite (Recommended)",
+            "🧠 Institutional Favorites",
+            "🚀 AI & Semiconductors",
+            "S&P 500",
+            "NASDAQ 100",
+            "Dow Jones 30",
+            "Russell 1000",
+            "Russell 3000",
+            "FXAIX / VOO Holdings",
+            "VTI Holdings",
+            "QQQM Holdings",
+            "SCHG Holdings",
+            "VGT Holdings",
+            "SMH Holdings",
+            "SOXX Holdings",
+            "Custom list",
+        ],
+        help="Choose the stock universe to rank. SwingIt Elite combines broad-market and growth ETF-style lists while removing duplicates."
     )
     if universe == "Custom list":
         custom_input = st.text_area(
@@ -214,7 +231,7 @@ with st.sidebar:
             help="Comma, semicolon, or newline separated."
         )
 
-    max_results = st.slider("Max tickers to scan", 10, 500, 100, step=10)
+    max_results = st.slider("Max tickers to scan", 25, 1500, 500, step=25)
 
     st.divider()
     st.markdown("#### Model settings")
@@ -280,35 +297,44 @@ def get_nasdaq100():
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_company_lookup(selected_universe: str):
+def get_company_lookup(selected_universe: str = ""):
     """Best-effort ticker → company name map for nicer score cards."""
     lookup = {}
     try:
-        if selected_universe == "S&P 500":
-            df = read_wiki_tables("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
-            sym_col = "Symbol"
-            name_col = "Security" if "Security" in df.columns else None
+        # S&P 500 company names
+        sp = read_wiki_tables("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        if "Symbol" in sp.columns:
+            name_col = "Security" if "Security" in sp.columns else None
             if name_col:
-                lookup = dict(zip(df[sym_col].astype(str).str.replace(".", "-", regex=False).str.upper(), df[name_col].astype(str)))
-        elif selected_universe == "NASDAQ 100":
-            tables = read_wiki_tables("https://en.wikipedia.org/wiki/Nasdaq-100")
-            for table in tables:
-                table.columns = [str(c).strip() for c in table.columns]
-                sym_col = "Ticker" if "Ticker" in table.columns else "Symbol" if "Symbol" in table.columns else None
-                name_col = "Company" if "Company" in table.columns else "Name" if "Name" in table.columns else None
-                if sym_col and name_col:
-                    lookup = dict(zip(table[sym_col].astype(str).str.replace(".", "-", regex=False).str.upper(), table[name_col].astype(str)))
-                    break
-        elif selected_universe == "Dow Jones 30":
-            lookup = {
-                "AAPL":"Apple", "AMGN":"Amgen", "AXP":"American Express", "BA":"Boeing", "CAT":"Caterpillar", "CRM":"Salesforce",
-                "CSCO":"Cisco", "CVX":"Chevron", "DIS":"Disney", "DOW":"Dow", "GS":"Goldman Sachs", "HD":"Home Depot",
-                "HON":"Honeywell", "IBM":"IBM", "INTC":"Intel", "JNJ":"Johnson & Johnson", "JPM":"JPMorgan Chase", "KO":"Coca-Cola",
-                "MCD":"McDonald’s", "MMM":"3M", "MRK":"Merck", "MSFT":"Microsoft", "NKE":"Nike", "PG":"Procter & Gamble",
-                "TRV":"Travelers", "UNH":"UnitedHealth", "V":"Visa", "VZ":"Verizon", "WBA":"Walgreens Boots Alliance", "WMT":"Walmart"
-            }
+                lookup.update(dict(zip(sp["Symbol"].astype(str).str.replace(".", "-", regex=False).str.upper(), sp[name_col].astype(str))))
+
+        # Nasdaq 100 company names
+        tables = read_wiki_tables("https://en.wikipedia.org/wiki/Nasdaq-100")
+        for table in tables:
+            table.columns = [str(c).strip() for c in table.columns]
+            sym_col = "Ticker" if "Ticker" in table.columns else "Symbol" if "Symbol" in table.columns else None
+            name_col = "Company" if "Company" in table.columns else "Name" if "Name" in table.columns else None
+            if sym_col and name_col:
+                lookup.update(dict(zip(table[sym_col].astype(str).str.replace(".", "-", regex=False).str.upper(), table[name_col].astype(str))))
+                break
     except Exception:
-        lookup = {}
+        pass
+
+    # Helpful names for ETF/sector universe names that may not be in the above tables.
+    lookup.update({
+        "AAPL":"Apple", "MSFT":"Microsoft", "NVDA":"NVIDIA", "AMZN":"Amazon", "META":"Meta Platforms", "GOOGL":"Alphabet Class A", "GOOG":"Alphabet Class C",
+        "AVGO":"Broadcom", "TSLA":"Tesla", "AMD":"Advanced Micro Devices", "ORCL":"Oracle", "ADBE":"Adobe", "CRM":"Salesforce", "NFLX":"Netflix",
+        "NOW":"ServiceNow", "PANW":"Palo Alto Networks", "CRWD":"CrowdStrike", "PLTR":"Palantir", "SNOW":"Snowflake", "MDB":"MongoDB", "NET":"Cloudflare",
+        "SHOP":"Shopify", "UBER":"Uber", "ABNB":"Airbnb", "COIN":"Coinbase", "MSTR":"MicroStrategy", "SMCI":"Super Micro Computer", "MU":"Micron",
+        "QCOM":"Qualcomm", "INTC":"Intel", "TXN":"Texas Instruments", "AMAT":"Applied Materials", "LRCX":"Lam Research", "KLAC":"KLA", "ASML":"ASML",
+        "TSM":"Taiwan Semiconductor", "ARM":"Arm Holdings", "MRVL":"Marvell", "ON":"ON Semiconductor", "MPWR":"Monolithic Power Systems", "ADI":"Analog Devices",
+        "BA":"Boeing", "CAT":"Caterpillar", "DE":"Deere", "GE":"GE Aerospace", "JPM":"JPMorgan Chase", "GS":"Goldman Sachs", "V":"Visa", "MA":"Mastercard",
+        "LLY":"Eli Lilly", "UNH":"UnitedHealth", "JNJ":"Johnson & Johnson", "ABBV":"AbbVie", "MRK":"Merck", "TMO":"Thermo Fisher", "ISRG":"Intuitive Surgical",
+        "COST":"Costco", "HD":"Home Depot", "WMT":"Walmart", "TGT":"Target", "NKE":"Nike", "DIS":"Disney", "CMG":"Chipotle", "SBUX":"Starbucks",
+        "FDX":"FedEx", "UPS":"UPS", "DAL":"Delta Air Lines", "UAL":"United Airlines", "CCL":"Carnival", "RCL":"Royal Caribbean",
+        "ETSY":"Etsy", "ROKU":"Roku", "RBLX":"Roblox", "HOOD":"Robinhood", "AFRM":"Affirm", "SOFI":"SoFi", "DKNG":"DraftKings", "CELH":"Celsius",
+        "EL":"Estée Lauder", "LULU":"Lululemon", "ULTA":"Ulta Beauty", "SE":"Sea Limited", "MELI":"MercadoLibre", "SPOT":"Spotify", "DDOG":"Datadog", "ZS":"Zscaler",
+    })
     return lookup
 
 
@@ -318,16 +344,139 @@ DOW30 = [
     "MRK", "MSFT", "NKE", "PG", "TRV", "UNH", "V", "VZ", "WBA", "WMT"
 ]
 
+# Curated ETF-style universe lists. These are intentionally compact and liquid.
+# They are not meant to replace official holdings files; they give SwingIt useful scan universes without relying on fragile ETF scraping.
+GROWTH_CORE = [
+    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","LLY","COST","NFLX","AMD","ADBE","CRM","ORCL","NOW","INTU","QCOM","AMAT",
+    "UBER","PANW","CRWD","PLTR","SHOP","SNOW","MDB","NET","DDOG","ZS","TEAM","WDAY","ANET","MELI","SPOT","ABNB","COIN","MSTR","SMCI","ARM",
+    "MU","MRVL","KLAC","LRCX","TXN","ADI","ASML","TSM","MPWR","ON","NXPI","MCHP","TER","CDNS","SNPS","ADSK","TTD","FICO","APP","DELL",
+]
+SCHG_NAMES = [
+    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","LLY","V","MA","COST","HD","NFLX","AMD","ADBE","CRM","ORCL","NOW","INTU","QCOM","AMAT","BKNG","ISRG","UBER","PANW","CRWD","PLTR","ANET","MELI","SPOT","SNOW","SHOP","ADSK"
+]
+VGT_NAMES = [
+    "AAPL","MSFT","NVDA","AVGO","ORCL","CRM","AMD","ADBE","ACN","CSCO","QCOM","INTU","IBM","NOW","AMAT","TXN","PANW","ADI","MU","LRCX","KLAC","ANET","INTC","CRWD","SNPS","CDNS","ADSK","MRVL","NXPI","MCHP","FTNT","DDOG","ZS","NET","MDB","SNOW","TEAM","WDAY"
+]
+SMH_NAMES = [
+    "NVDA","TSM","AVGO","ASML","AMD","QCOM","AMAT","TXN","LRCX","MU","INTC","ADI","KLAC","MRVL","NXPI","MCHP","MPWR","ON","TER","SWKS","ARM","SMCI","DELL"
+]
+SOXX_NAMES = [
+    "NVDA","AVGO","AMD","QCOM","TXN","AMAT","MU","INTC","ADI","LRCX","KLAC","MRVL","NXPI","MCHP","MPWR","ON","TER","SWKS","ASML","TSM","ARM"
+]
+HIGH_OPPORTUNITY = [
+    "TSLA","NVDA","AMD","PLTR","COIN","MSTR","SMCI","SOFI","HOOD","AFRM","RBLX","ROKU","DKNG","CELH","SHOP","SNOW","NET","DDOG","ZS","CRWD","PANW","MDB","APP","ARM","MU","MRVL","DELL","LULU","ULTA","EL","NKE","TGT","DIS","BA","CCL","RCL","DAL","UAL","FDX","UPS"
+]
+
+ETF_LISTS = {
+    "FXAIX": lambda: get_sp500(),
+    "VOO": lambda: get_sp500(),
+    "VTI": lambda: dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY),
+    "QQQM": lambda: get_nasdaq100(),
+    "SCHG": lambda: SCHG_NAMES,
+    "VGT": lambda: VGT_NAMES,
+    "SMH": lambda: SMH_NAMES,
+    "SOXX": lambda: SOXX_NAMES,
+}
+
+
+def dedupe(tickers):
+    seen = set()
+    out = []
+    for t in tickers:
+        t = str(t).strip().upper().replace(".", "-")
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def add_sources(source_map, tickers, source_name):
+    for t in dedupe(tickers):
+        source_map.setdefault(t, set()).add(source_name)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_universe_payload(selected_universe: str, custom_text: str = ""):
+    """Returns (tickers, source_map) for the selected universe."""
+    source_map = {}
+
+    def add_etf(etf):
+        names = ETF_LISTS[etf]()
+        add_sources(source_map, names, etf)
+        return names
+
+    if selected_universe == "S&P 500":
+        tickers = get_sp500(); add_sources(source_map, tickers, "S&P 500")
+    elif selected_universe == "NASDAQ 100":
+        tickers = get_nasdaq100(); add_sources(source_map, tickers, "NASDAQ 100")
+    elif selected_universe == "Dow Jones 30":
+        tickers = DOW30; add_sources(source_map, tickers, "Dow 30")
+    elif selected_universe == "Russell 1000":
+        tickers = dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY)
+        add_sources(source_map, tickers, "Russell 1000-style")
+    elif selected_universe == "Russell 3000":
+        tickers = dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY + SCHG_NAMES + VGT_NAMES + SMH_NAMES + SOXX_NAMES)
+        add_sources(source_map, tickers, "Russell 3000-style")
+    elif selected_universe == "FXAIX / VOO Holdings":
+        tickers = add_etf("VOO")
+        add_sources(source_map, tickers, "FXAIX")
+    elif selected_universe == "VTI Holdings":
+        tickers = add_etf("VTI")
+    elif selected_universe == "QQQM Holdings":
+        tickers = add_etf("QQQM")
+    elif selected_universe == "SCHG Holdings":
+        tickers = add_etf("SCHG")
+    elif selected_universe == "VGT Holdings":
+        tickers = add_etf("VGT")
+    elif selected_universe == "SMH Holdings":
+        tickers = add_etf("SMH")
+    elif selected_universe == "SOXX Holdings":
+        tickers = add_etf("SOXX")
+    elif selected_universe == "⭐ SwingIt Elite (Recommended)":
+        tickers = dedupe(add_etf("VOO") + add_etf("VTI") + add_etf("QQQM"))
+    elif selected_universe == "🧠 Institutional Favorites":
+        tickers = dedupe(add_etf("VOO") + add_etf("QQQM") + add_etf("SCHG") + add_etf("VGT"))
+    elif selected_universe == "🚀 AI & Semiconductors":
+        tickers = dedupe(add_etf("QQQM") + add_etf("VGT") + add_etf("SMH") + add_etf("SOXX"))
+    else:
+        raw = custom_text.replace("\n", ",").replace(";", ",")
+        tickers = dedupe([t for t in raw.split(",") if t.strip()])
+        add_sources(source_map, tickers, "Custom")
+
+    # Convert sets to sorted lists for caching/session-state friendliness.
+    source_map = {k: sorted(v) for k, v in source_map.items()}
+    return dedupe(tickers), source_map
+
 
 def get_universe_tickers(selected_universe: str, custom_text: str = ""):
-    if selected_universe == "S&P 500":
-        return get_sp500()
-    if selected_universe == "NASDAQ 100":
-        return get_nasdaq100()
-    if selected_universe == "Dow Jones 30":
-        return DOW30
-    raw = custom_text.replace("\n", ",").replace(";", ",")
-    return [t.strip().upper().replace(".", "-") for t in raw.split(",") if t.strip()]
+    return get_universe_payload(selected_universe, custom_text)[0]
+
+
+def institutional_label(sources):
+    sources = sources or []
+    elite_sources = {"VOO", "FXAIX", "VTI", "QQQM", "SCHG", "VGT", "SMH", "SOXX", "S&P 500", "NASDAQ 100"}
+    count = len([s for s in sources if s in elite_sources])
+    if count >= 4:
+        return f"🏛 Elite ({count})"
+    if count >= 2:
+        return f"🏛 Strong ({count})"
+    if count == 1:
+        return "🧪 Specialty (1)"
+    return "—"
+
+
+def institutional_score(sources):
+    sources = sources or []
+    count = len(sources)
+    if count >= 4:
+        return 100
+    if count == 3:
+        return 80
+    if count == 2:
+        return 60
+    if count == 1:
+        return 35
+    return 0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1190,6 +1339,9 @@ def hot_card(rank, row):
     catalyst = row.get("Catalyst", "—")
     spring = row.get("Spring", "—")
     spring_tf = row.get("Spring TF", "—")
+    institution = row.get("Institution", "—")
+    sources = row.get("Sources", "—")
+    institution_score = row.get("Institution Score", 0)
 
     history_score = row.get("History Score", "—")
     opp_score = row.get("Opportunity Score", "—")
@@ -1264,6 +1416,14 @@ def hot_card(rank, row):
         {_safe_html(clean_label(confidence))}<br><br>
         Confidence is mainly based on the number of historical RSI panic events. It is separate from how attractive the setup looks.
     """
+    institution_tip = f"""
+        <strong>Institutional presence</strong><br>
+        {_safe_html(clean_label(institution))}<br>
+        Score: {institution_score}/100<br><br>
+        <strong>Included in</strong><br>
+        {_safe_html(sources)}<br><br>
+        This does not make a trade good by itself. It simply tells you whether the setup is appearing in a stock that belongs to higher-quality index/ETF-style universes.
+    """
 
     return f"""
     <div class="hot-card">
@@ -1282,6 +1442,7 @@ def hot_card(rank, row):
             {hover_item('Spring', f'{spring_tf} · {clean_label(spring)}', spring_score_tip, dot=True)}
             {hover_item('News', clean_label(catalyst), news_tip, dot=True)}
             {hover_item('Confidence', clean_label(confidence), confidence_tip, dot=True)}
+            {hover_item('Institution', clean_label(institution), institution_tip, dot=True)}
         </div>
     </div>
     """
@@ -1365,11 +1526,11 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V5.6.2")
+st.markdown("# 🔥 SwingIt V6")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
-    all_tickers = get_universe_tickers(universe, custom_input)
+    all_tickers, source_map = get_universe_payload(universe, custom_input)
     if not all_tickers:
         st.warning("No tickers found. Check your custom list or choose another universe.")
         st.stop()
@@ -1383,6 +1544,7 @@ if run:
         "include_news": include_news,
         "spring_timeframe": spring_timeframe,
         "tickers_scanned": len(tickers),
+        "source_map": {t: source_map.get(t, []) for t in tickers},
         "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
     }
 
@@ -1448,11 +1610,16 @@ if not results:
 
 # Compact model output table.
 company_lookup = get_company_lookup(active_universe)
+active_source_map = meta.get("source_map", {}) or {}
 rows = []
 for r in results:
+    ticker_sources = active_source_map.get(r["ticker"], [])
     rows.append({
         "Ticker": r["ticker"],
         "Company": company_lookup.get(r["ticker"], ""),
+        "Institution": institutional_label(ticker_sources),
+        "Institution Score": institutional_score(ticker_sources),
+        "Sources": " • ".join(ticker_sources) if ticker_sources else "—",
         "Swing Score": r["swing_score"],
         "Setup Quality": r.get("setup_quality"),
         "RSI": r["current_rsi"],
