@@ -1,5 +1,5 @@
 """
-SwingIt V3 — RSI Rebound Probability Engine
+SwingIt V3.2 — RSI Rebound Probability Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -27,7 +27,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V3",
+    page_title="SwingIt V3.2",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -536,6 +536,27 @@ def get_news_snapshot(ticker: str):
         return {"news_label": "📰 News unavailable", "news_headline": "News lookup failed or was rate-limited."}
 
 
+
+
+def confidence_from_history(event_count, recovery_rate):
+    """Separate confidence from opportunity: how much evidence supports the pattern."""
+    if not event_count or event_count <= 0:
+        return 0, "⚪ No history"
+
+    # Event count matters most. Consistency helps, but we do not show hit rate in the main table.
+    event_component = clamp((min(event_count, 8) / 8) * 75)
+    consistency_component = clamp((recovery_rate or 0) * 0.25)
+    score = int(round(event_component + consistency_component))
+
+    if event_count <= 2:
+        label = f"🔴 Low ({event_count} event{'s' if event_count != 1 else ''})"
+    elif event_count <= 5:
+        label = f"🟡 Medium ({event_count} events)"
+    else:
+        label = f"🟢 High ({event_count} events)"
+
+    return score, label
+
 @st.cache_data(ttl=300, show_spinner=False)
 def compute_candidate(ticker: str, target_level: int, bounce_days: int, include_news_lookup: bool = True):
     try:
@@ -555,6 +576,10 @@ def compute_candidate(ticker: str, target_level: int, bounce_days: int, include_
         opp_score = current_rsi_opportunity_score(current_rsi)
         rebounds = analyze_rsi_rebounds(close, rsi_series, target_level=target_level, bounce_days=bounce_days)
         history_score = rebounds["history_score"]
+        confidence_score, confidence_label = confidence_from_history(
+            rebounds.get("event_count", 0),
+            rebounds.get("target_recovery_rate"),
+        )
 
         # Swing score = historical edge + current opportunity.
         # This prevents stocks that already fully recovered from dominating the watchlist.
@@ -580,6 +605,8 @@ def compute_candidate(ticker: str, target_level: int, bounce_days: int, include_
             "opportunity": opportunity_label(current_rsi),
             "opportunity_score": int(round(opp_score)),
             "history_score": history_score,
+            "confidence_score": confidence_score,
+            "confidence_label": confidence_label,
             "swing_score": swing_score,
             "days_since_rsi_under_30": days_since_rsi_under_30,
             "sma50": round(float(sma50.iloc[-1]), 2) if pd.notna(sma50.iloc[-1]) else None,
@@ -632,7 +659,8 @@ def hot_card(rank, row):
             {row['Opportunity']}<br>
             Current {current_price} → Swing target {potential_price}<br>
             RSI {row['RSI']} · Potential {row['Avg Max Bounce']}<br>
-            Avg max in {row['Avg Days to Max']} days · {row['History']}
+            Avg max in {row['Avg Days to Max']} days · {row['History']}<br>
+            {row.get('Confidence', '')}
         </div>
     </div>
     """
@@ -697,7 +725,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V3")
+st.markdown("# 🔥 SwingIt V3.2")
 st.markdown(
     f"<div class='small-muted'>Ranking {universe} for 1–4 week RSI rebound swing candidates · Target RSI {rsi_target} · Max bounce window {bounce_window} trading days</div>",
     unsafe_allow_html=True,
@@ -757,6 +785,8 @@ for r in results:
         f"Avg Gain to RSI {rsi_target}": r.get("avg_gain_to_target_pct"),
         f"Avg Days to RSI {rsi_target}": r.get("avg_days_to_target"),
         "History": f"{r.get('event_count', 0)} events",
+        "Confidence": r.get("confidence_label"),
+        "Confidence Score": r.get("confidence_score"),
         "News": r.get("news_label"),
         "Headline": r.get("news_headline"),
         "History Score": r.get("history_score"),
@@ -774,7 +804,7 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Scanned", len(tickers))
 c2.metric("Usable results", len(df_sorted))
 c3.metric("RSI < 40 now", int((pd.to_numeric(df_sorted["RSI"], errors="coerce") < 40).sum()))
-c4.metric("Score 80+", int((pd.to_numeric(df_sorted["Swing Score"], errors="coerce") >= 80).sum()))
+c4.metric("High-confidence patterns", int(df_sorted["Confidence"].astype(str).str.contains("High", na=False).sum()))
 
 st.markdown("## 🔥 Best Swing Opportunities")
 top = df_sorted.head(3)
@@ -799,10 +829,10 @@ ascending = sort_direction == "Ascending"
 display = df_sorted.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
-    "Ticker", "Swing Score", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "News"
+    "Ticker", "Swing Score", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "News"
 ]
 research_cols = compact_cols + [
-    "Headline", f"Avg Gain to RSI {rsi_target}", f"Avg Days to RSI {rsi_target}", "History Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "Headline", f"Avg Gain to RSI {rsi_target}", f"Avg Days to RSI {rsi_target}", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -813,6 +843,7 @@ st.dataframe(
     height=440,
     column_config={
         "Swing Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
+        "Confidence Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "RSI": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
         "Price": st.column_config.NumberColumn(format="$%.2f"),
         "Potential Swing Price": st.column_config.NumberColumn(format="$%.2f"),
@@ -831,6 +862,8 @@ with st.expander("What the Swing Score means"):
     **2. Historical rebound score** — what happened the last times this stock fell below RSI 30. It uses recovery frequency to RSI {rsi_target}, average gain to RSI {rsi_target}, average max bounce within {bounce_window} trading days, speed of recovery, days to max bounce, oversold depth, sample size, and a drawdown penalty.
 
     **Panic zone** means current RSI is below 25. It is the most washed-out bucket in the model. It can be powerful, but it can also still be falling, so it should be treated as “high alert,” not an automatic buy.
+
+    **Confidence** is separate from Swing Score. Low confidence means only 1–2 prior RSI&lt;30 events, Medium means 3–5 events, and High means 6+ events. A low-confidence setup can still be interesting, but it should not carry the same weight as a repeated pattern.
 
     **Potential Swing Price** is not a price target from an analyst. It is simply current price plus the stock’s own average max bounce after prior RSI&lt;30 events within the selected bounce window.
 
