@@ -1,5 +1,5 @@
 """
-SwingIt V7 — Overreaction Engine
+SwingIt V7.1.1 — More Accurate Universes
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -29,7 +29,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V7",
+    page_title="SwingIt V7.1",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -301,6 +301,105 @@ def get_nasdaq100():
     return []
 
 
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_ishares_holdings(product_id: str, ticker: str):
+    """Best-effort pull of current iShares holdings CSV.
+
+    Used for larger, more accurate universes such as Russell 1000 (IWB),
+    Russell 3000 (IWV), total market (ITOT), and S&P 500 ETF proxy (IVV).
+    Falls back elsewhere if BlackRock changes/blocks the download.
+    """
+    ticker = ticker.upper().strip()
+    url = (
+        f"https://www.ishares.com/us/products/{product_id}/"
+        f"1467271812596.ajax?fileType=csv&fileName={ticker}_holdings&dataType=fund"
+    )
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; SwingIt/7.1)"}
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+    text = response.text
+
+    # iShares files include several metadata lines before the actual CSV header.
+    lines = text.splitlines()
+    header_idx = None
+    for i, line in enumerate(lines):
+        low = line.lower()
+        if "ticker" in low and ("name" in low or "issuer" in low) and ("," in line):
+            header_idx = i
+            break
+    if header_idx is None:
+        raise ValueError(f"Could not find holdings header for {ticker}.")
+
+    csv_text = "\n".join(lines[header_idx:])
+    df = pd.read_csv(StringIO(csv_text), engine="python")
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Column names vary slightly across iShares downloads.
+    ticker_col = None
+    for col in ["Ticker", "ticker", "Local Ticker", "Trading Ticker"]:
+        if col in df.columns:
+            ticker_col = col
+            break
+    if ticker_col is None:
+        for col in df.columns:
+            if "ticker" in str(col).lower():
+                ticker_col = col
+                break
+    if ticker_col is None:
+        raise ValueError(f"Could not find ticker column for {ticker}.")
+
+    raw = df[ticker_col].dropna().astype(str).tolist()
+    out = []
+    for t in raw:
+        t = t.strip().upper().replace(".", "-")
+        # Remove cash rows, currencies, empty symbols, and obvious non-equity placeholders.
+        if not t or t in {"-", "--", "USD", "CASH", "US DOLLAR"}:
+            continue
+        if " " in t or len(t) > 7:
+            continue
+        out.append(t)
+    return dedupe(out)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_russell1000():
+    try:
+        return get_ishares_holdings("239707", "IWB")
+    except Exception:
+        # Fallback: better than failing, but label/source will show this is approximate.
+        return dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_russell3000():
+    try:
+        return get_ishares_holdings("239714", "IWV")
+    except Exception:
+        # ITOT is another broad-market proxy and often has ~2,500 holdings.
+        try:
+            return get_ishares_holdings("239724", "ITOT")
+        except Exception:
+            return dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY + SCHG_NAMES + VGT_NAMES + SMH_NAMES + SOXX_NAMES)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_total_market():
+    try:
+        return get_ishares_holdings("239724", "ITOT")
+    except Exception:
+        return get_russell3000()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sp500_etf_proxy():
+    try:
+        return get_ishares_holdings("239726", "IVV")
+    except Exception:
+        return get_sp500()
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_company_lookup(selected_universe: str = ""):
     """Best-effort ticker → company name map for nicer score cards."""
@@ -373,9 +472,11 @@ HIGH_OPPORTUNITY = [
 ]
 
 ETF_LISTS = {
-    "FXAIX": lambda: get_sp500(),
-    "VOO": lambda: get_sp500(),
-    "VTI": lambda: dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY),
+    # ETF/mutual-fund proxies. Where possible, these use live ETF holdings instead of
+    # short curated lists so broad universes do not accidentally shrink.
+    "FXAIX": lambda: get_sp500_etf_proxy(),
+    "VOO": lambda: get_sp500_etf_proxy(),
+    "VTI": lambda: get_total_market(),
     "QQQM": lambda: get_nasdaq100(),
     "SCHG": lambda: SCHG_NAMES,
     "VGT": lambda: VGT_NAMES,
@@ -417,11 +518,11 @@ def get_universe_payload(selected_universe: str, custom_text: str = ""):
     elif selected_universe == "Dow Jones 30":
         tickers = DOW30; add_sources(source_map, tickers, "Dow 30")
     elif selected_universe == "Russell 1000":
-        tickers = dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY)
-        add_sources(source_map, tickers, "Russell 1000-style")
+        tickers = get_russell1000()
+        add_sources(source_map, tickers, "Russell 1000 / IWB")
     elif selected_universe == "Russell 3000":
-        tickers = dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY + SCHG_NAMES + VGT_NAMES + SMH_NAMES + SOXX_NAMES)
-        add_sources(source_map, tickers, "Russell 3000-style")
+        tickers = get_russell3000()
+        add_sources(source_map, tickers, "Russell 3000 / IWV")
     elif selected_universe == "FXAIX / VOO Holdings":
         tickers = add_etf("VOO")
         add_sources(source_map, tickers, "FXAIX")
