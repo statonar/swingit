@@ -1,5 +1,5 @@
 """
-SwingIt V9.3.1.3.1 — Trading Terminal UI, Top Bar Controls
+SwingIt V10 — Morning Report + Trading Terminal UI
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V9.3.1.3.1",
+    page_title="SwingIt V10",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -259,6 +259,11 @@ if "leaderboard_filter" not in st.session_state:
 if "cancel_scan_requested" not in st.session_state:
     st.session_state.cancel_scan_requested = False
 
+if "morning_report_active" not in st.session_state:
+    st.session_state.morning_report_active = False
+if "last_morning_report" not in st.session_state:
+    st.session_state.last_morning_report = None
+
 # ──────────────────────────────────────────────────────────────────────────────
 # V9 top control bar — replaces the sidebar
 # ──────────────────────────────────────────────────────────────────────────────
@@ -316,7 +321,7 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V9.3.1.3.1</div>
+            <div class="terminal-title">🔥 SwingIt V10</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
@@ -425,6 +430,248 @@ def save_favorites(tickers: list[str]) -> None:
             json.dump(clean, f, indent=2)
     except Exception:
         st.warning("Could not save favorites to disk in this environment. They will still work during this session.")
+
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Morning Report helpers — Zazu mode for Favorites
+# ──────────────────────────────────────────────────────────────────────────────
+MORNING_SNAPSHOT_FILE = "swingit_morning_snapshot.json"
+
+
+def _to_float(value, default=None):
+    try:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def load_morning_snapshot() -> dict:
+    try:
+        if os.path.exists(MORNING_SNAPSHOT_FILE):
+            with open(MORNING_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_morning_snapshot(results: list[dict]) -> None:
+    snapshot = {
+        "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "tickers": {},
+    }
+    for r in results or []:
+        t = r.get("ticker")
+        if not t:
+            continue
+        snapshot["tickers"][t] = {
+            "price": r.get("price"),
+            "rsi": r.get("current_rsi"),
+            "setup_quality": r.get("setup_quality"),
+            "swing_score": r.get("swing_score"),
+            "spring_score": r.get("spring_score"),
+            "spring_label": r.get("spring_label"),
+            "rebound_stage_label": r.get("rebound_stage_label"),
+            "overreaction_score": r.get("overreaction_score"),
+            "overreaction_label": r.get("overreaction_label"),
+            "opportunity_remaining_pct": r.get("opportunity_remaining_pct"),
+            "news_label": r.get("news_label"),
+            "news_headline": r.get("news_headline"),
+            "panic_drop_pct": r.get("panic_drop_pct"),
+            "panic_volume_ratio": r.get("panic_volume_ratio"),
+            "red_flag_label": r.get("red_flag_label"),
+        }
+    try:
+        with open(MORNING_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2, default=str)
+    except Exception:
+        # Streamlit Cloud can be read-only in some environments; if so, the report still works for this run.
+        pass
+
+
+def pct_change(new, old):
+    new = _to_float(new)
+    old = _to_float(old)
+    if new is None or old in (None, 0):
+        return None
+    return (new / old - 1) * 100
+
+
+def _changed_label(current, previous):
+    if previous in (None, ""):
+        return "new"
+    if str(current) != str(previous):
+        return "changed"
+    return "same"
+
+
+def build_morning_report(results: list[dict], previous_snapshot: dict | None = None) -> dict:
+    """Build a Favorites-first morning briefing.
+
+    The report is deliberately practical: it highlights new panic/overreaction situations,
+    names that are becoming ready now, new stage/spring/news changes, red flags, and quiet names.
+    """
+    previous_snapshot = previous_snapshot or {}
+    previous_tickers = previous_snapshot.get("tickers", {}) if isinstance(previous_snapshot, dict) else {}
+    alerts = {
+        "overreaction": [],
+        "ready_now": [],
+        "new_turns": [],
+        "red_flags": [],
+        "notable_changes": [],
+        "quiet": [],
+    }
+
+    for r in results or []:
+        t = r.get("ticker")
+        prev = previous_tickers.get(t, {}) if t else {}
+        price_chg = pct_change(r.get("price"), prev.get("price"))
+        setup_delta = None
+        if prev:
+            setup_delta = (_to_float(r.get("setup_quality"), 0) or 0) - (_to_float(prev.get("setup_quality"), 0) or 0)
+        rsi_delta = None
+        if prev:
+            rsi_delta = (_to_float(r.get("current_rsi"), 0) or 0) - (_to_float(prev.get("rsi"), 0) or 0)
+
+        overreaction_score = _to_float(r.get("overreaction_score"), 0) or 0
+        setup = _to_float(r.get("setup_quality"), 0) or 0
+        spring = _to_float(r.get("spring_score"), 0) or 0
+        remaining = _to_float(r.get("opportunity_remaining_pct"), 0) or 0
+        shock = _to_float(r.get("panic_shock_score"), 0) or 0
+        red_label = str(r.get("red_flag_label") or "")
+        has_red_flag = "red flag" in red_label.lower() or "avoid" in red_label.lower() or "major" in red_label.lower()
+
+        item = {
+            "ticker": t,
+            "price": r.get("price"),
+            "price_change_pct": price_chg,
+            "setup": int(round(setup)),
+            "setup_delta": setup_delta,
+            "swing": r.get("swing_score"),
+            "spring": int(round(spring)),
+            "spring_label": r.get("spring_label"),
+            "stage": r.get("rebound_stage_label"),
+            "overreaction": int(round(overreaction_score)),
+            "overreaction_label": r.get("overreaction_label"),
+            "remaining": remaining,
+            "news_label": r.get("news_label"),
+            "headline": r.get("news_headline"),
+            "panic_drop_pct": r.get("panic_drop_pct"),
+            "panic_drop_days": r.get("panic_drop_days"),
+            "panic_volume_ratio": r.get("panic_volume_ratio"),
+            "red_flag": r.get("red_flag_label"),
+            "rsi": r.get("current_rsi"),
+            "rsi_delta": rsi_delta,
+        }
+
+        # Overreaction: the Zazu headline. High selloff shock + decent narrative/overreaction + no red flag.
+        if overreaction_score >= 70 and shock >= 45 and not has_red_flag:
+            alerts["overreaction"].append(item)
+            continue
+
+        # Red flags should be surfaced even if a score looks tempting.
+        if has_red_flag:
+            alerts["red_flags"].append(item)
+            continue
+
+        # Ready now: strong setup with opportunity left.
+        if setup >= 75 and remaining >= 30:
+            alerts["ready_now"].append(item)
+            continue
+
+        # New turns: stage/spring changed in a useful direction or setup jumped materially.
+        stage_changed = _changed_label(r.get("rebound_stage_label"), prev.get("rebound_stage_label")) == "changed"
+        spring_changed = _changed_label(r.get("spring_label"), prev.get("spring_label")) == "changed"
+        useful_stage = any(x in str(r.get("rebound_stage_label") or "").lower() for x in ["turn", "reversal", "stabil", "confirmed"])
+        useful_spring = any(x in str(r.get("spring_label") or "").lower() for x in ["improving", "fired up", "early turn"])
+        if (stage_changed and useful_stage) or (spring_changed and useful_spring) or (setup_delta is not None and setup_delta >= 10):
+            alerts["new_turns"].append(item)
+            continue
+
+        # Notable but not urgent.
+        if price_chg is not None and abs(price_chg) >= 3 or (rsi_delta is not None and abs(rsi_delta) >= 8):
+            alerts["notable_changes"].append(item)
+            continue
+
+        alerts["quiet"].append(item)
+
+    alerts["overreaction"].sort(key=lambda x: (x["overreaction"], x["remaining"] or 0), reverse=True)
+    alerts["ready_now"].sort(key=lambda x: (x["setup"], x["remaining"] or 0), reverse=True)
+    alerts["new_turns"].sort(key=lambda x: (x["setup_delta"] or 0, x["setup"]), reverse=True)
+    alerts["red_flags"].sort(key=lambda x: x["overreaction"], reverse=True)
+    alerts["notable_changes"].sort(key=lambda x: abs(x["price_change_pct"] or 0), reverse=True)
+    return alerts
+
+
+def _fmt_pct(value, digits=1):
+    v = _to_float(value)
+    if v is None:
+        return "—"
+    sign = "+" if v > 0 else ""
+    return f"{sign}{v:.{digits}f}%"
+
+
+def _report_line(item: dict, category: str) -> str:
+    ticker = item.get("ticker") or "—"
+    headline = html.escape(str(item.get("headline") or "No headline found."))
+    news = html.escape(str(item.get("news_label") or "No news label"))
+    stage = html.escape(str(item.get("stage") or "—"))
+    spring = html.escape(str(item.get("spring_label") or "—"))
+    if category == "overreaction":
+        shock = _fmt_pct(item.get("panic_drop_pct"))
+        days = item.get("panic_drop_days") or "?"
+        return f"<li><strong>{ticker}</strong> — possible overreaction: {shock} in {days}d, Overreaction {item.get('overreaction')}/100, Remaining {_fmt_pct(item.get('remaining'),0)}.<br><span class='small-muted'>{news} · {headline}</span></li>"
+    if category == "ready":
+        return f"<li><strong>{ticker}</strong> — ready now: Setup {item.get('setup')}/100, Spring {item.get('spring')}/100, Remaining {_fmt_pct(item.get('remaining'),0)}.<br><span class='small-muted'>{stage} · {spring}</span></li>"
+    if category == "turn":
+        delta = item.get("setup_delta")
+        delta_text = f" ({'+' if delta and delta > 0 else ''}{delta:.0f} vs last)" if delta is not None else ""
+        return f"<li><strong>{ticker}</strong> — new turn forming: Setup {item.get('setup')}/100{delta_text}.<br><span class='small-muted'>{stage} · {spring}</span></li>"
+    if category == "red":
+        return f"<li><strong>{ticker}</strong> — caution: {html.escape(str(item.get('red_flag') or 'Red flag language found'))}.<br><span class='small-muted'>{headline}</span></li>"
+    return f"<li><strong>{ticker}</strong> — notable move: price {_fmt_pct(item.get('price_change_pct'))}, RSI {item.get('rsi')}.<br><span class='small-muted'>{headline}</span></li>"
+
+
+def render_morning_report(report: dict, favorites_count: int, previous_snapshot: dict | None = None):
+    previous_time = (previous_snapshot or {}).get("saved_at")
+    st.markdown("## ☕🦜 Morning Report")
+    st.caption("Favorites-first briefing: what changed, what is actionable, and what should be ignored for now.")
+    counts = {k: len(v) for k, v in (report or {}).items()}
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Favorites scanned", favorites_count)
+    c2.metric("Overreaction alerts", counts.get("overreaction", 0))
+    c3.metric("Ready now", counts.get("ready_now", 0))
+    c4.metric("New turns", counts.get("new_turns", 0))
+    c5.metric("Cautions", counts.get("red_flags", 0))
+    if previous_time:
+        st.caption(f"Compared with last Morning Report snapshot from {previous_time}.")
+    else:
+        st.caption("No previous Morning Report snapshot found yet. Today becomes the baseline for future 'what changed' notes.")
+
+    sections = [
+        ("😱 Possible overreaction panic", "overreaction", "overreaction"),
+        ("🔥 Ready now", "ready_now", "ready"),
+        ("🌱 New turns forming", "new_turns", "turn"),
+        ("⚠️ Cautions / red flags", "red_flags", "red"),
+        ("👀 Notable changes", "notable_changes", "note"),
+    ]
+    for title, key, kind in sections:
+        items = (report or {}).get(key, [])[:6]
+        if not items:
+            continue
+        with st.container(border=True):
+            st.markdown(f"#### {title}")
+            html_lines = "<ul>" + "".join(_report_line(item, kind) for item in items) + "</ul>"
+            st.markdown(html_lines, unsafe_allow_html=True)
+
+    if not any(counts.get(k, 0) for k in ["overreaction", "ready_now", "new_turns", "red_flags", "notable_changes"]):
+        st.success("🦜 Morning report: The kingdom is quiet. No major Favorites alerts right now.")
 
 
 def parse_uploaded_tickers(uploaded_file) -> list[str]:
@@ -2776,21 +3023,56 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
+# Morning Report landing action
+run_morning_report = False
+if st.session_state.scan_results is None and not run:
+    fav_count = len(load_favorites())
+    st.markdown(
+        "<div class='small-muted'>Choose a universe in the top toolbar, run a custom scan, or start with your Favorites Morning Report.</div>",
+        unsafe_allow_html=True,
+    )
+    st.divider()
+    with st.container(border=True):
+        st.markdown("### ☕🦜 Morning Report")
+        st.markdown(
+            "Your Zazu-style Favorites briefing: overreaction panic alerts, ready-now candidates, new turns, and red flags."
+        )
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            if st.button("☕ Give me the Morning Report", use_container_width=True, disabled=(fav_count == 0), key="morning_report_button"):
+                run_morning_report = True
+        with col_b:
+            if fav_count == 0:
+                st.warning("Add Favorites first, then Morning Report can watch them for changes.")
+            else:
+                st.caption(f"Will scan {fav_count} Favorites and compare against your last Morning Report snapshot.")
+        st.markdown("---")
+        st.markdown("### 📈 Custom Scan")
+        st.caption("Use the toolbar above to choose a universe, model settings, and run a normal Swing Scan.")
+    if not run_morning_report:
+        st.stop()
+
 # When the button is clicked, run the scan once and store the result.
-if run:
+if run or run_morning_report:
     st.session_state.cancel_scan_requested = False
-    universe_text = custom_input
-    if universe == "📂 CSV upload":
-        uploaded_tickers = parse_uploaded_tickers(csv_uploaded)
-        universe_text = ",".join(uploaded_tickers)
-    all_tickers, source_map = get_universe_payload(universe, universe_text)
+    previous_morning_snapshot = load_morning_snapshot() if run_morning_report else None
+    scan_universe = "⭐ Favorites" if run_morning_report else universe
+    universe_text = ""
+    if not run_morning_report:
+        universe_text = custom_input
+        if universe == "📂 CSV upload":
+            uploaded_tickers = parse_uploaded_tickers(csv_uploaded)
+            universe_text = ",".join(uploaded_tickers)
+    all_tickers, source_map = get_universe_payload(scan_universe, universe_text)
     if not all_tickers:
         st.warning("No tickers found. Check your custom list or choose another universe.")
         st.stop()
 
     tickers = all_tickers
     st.session_state.scan_meta = {
-        "universe": universe,
+        "universe": scan_universe,
+        "morning_report": bool(run_morning_report),
+        "previous_morning_snapshot": previous_morning_snapshot,
         "profit_target": profit_target,
         "bounce_window": bounce_window,
         "include_news": include_news,
@@ -2801,7 +3083,10 @@ if run:
         "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
     }
 
-    st.info(f"Scanning full universe: {len(tickers)} tickers from {universe}…")
+    if run_morning_report:
+        st.info(f"☕🦜 Building Morning Report: scanning {len(tickers)} Favorites…")
+    else:
+        st.info(f"Scanning full universe: {len(tickers)} tickers from {scan_universe}…")
     progress = st.progress(0)
     status = st.empty()
     leaders_box = st.empty()
@@ -2842,24 +3127,13 @@ if run:
     cancel_box.empty()
     st.session_state.scan_results = results
     st.session_state.leaderboard_filter = "All"
+    if run_morning_report:
+        report = build_morning_report(results, previous_morning_snapshot)
+        st.session_state.last_morning_report = report
+        save_morning_snapshot(results)
 
-# If no scan has been run yet, show landing state.
+# If no scan has been run yet, the landing card above should have stopped execution.
 if st.session_state.scan_results is None:
-    st.markdown(
-        f"<div class='small-muted'>Choose a universe in the top toolbar, then run the scan to rank 1–4 week RSI panic swing candidates.</div>",
-        unsafe_allow_html=True,
-    )
-    st.divider()
-    st.markdown(
-        """
-        <div style="background:#ffffff;border:1px solid #d8dee6;border-radius:18px;padding:36px;text-align:center;">
-            <div style="font-size:3rem;">📈</div>
-            <h3>Run the scan to build today's rebound watchlist.</h3>
-            <p class="small-muted">This version keeps your results alive when you sort, change ticker detail, or interact with the page.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
     st.stop()
 
 results = st.session_state.scan_results or []
@@ -2880,6 +3154,12 @@ st.markdown(
     f"<div class='small-muted'>Latest scan: {active_universe} · Profit goal {active_profit_target}% · Swing window {active_bounce_window} trading days · TTM {active_spring_timeframe} · {meta.get('run_date', '')}</div>",
     unsafe_allow_html=True,
 )
+if meta.get("morning_report") and st.session_state.get("last_morning_report"):
+    render_morning_report(
+        st.session_state.last_morning_report,
+        favorites_count=active_tickers_scanned or len(results),
+        previous_snapshot=meta.get("previous_morning_snapshot"),
+    )
 st.divider()
 
 if not results:
