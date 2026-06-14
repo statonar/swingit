@@ -1,5 +1,5 @@
 """
-SwingIt V6.4.2 — Rebound Stage + Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V6.5 — Compact Sidebar + Full Universe Scan
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -29,7 +29,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V6.4.2",
+    page_title="SwingIt V6.5",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -58,6 +58,15 @@ st.markdown(
         background:var(--surface)!important;
         border-right:1px solid var(--border);
     }
+
+    /* Compact sidebar controls */
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { margin-bottom:.25rem; }
+    [data-testid="stSidebar"] hr { margin:.65rem 0; }
+    [data-testid="stSidebar"] label { font-size:.78rem!important; }
+    [data-testid="stSidebar"] .stSelectbox,
+    [data-testid="stSidebar"] .stTextArea,
+    [data-testid="stSidebar"] .stSlider,
+    [data-testid="stSidebar"] .stToggle { margin-bottom:.35rem; }
     h1,h2,h3,h4,p,span,label,div { color:var(--text); }
     .small-muted { color:var(--muted); font-size:0.9rem; }
     [data-testid="stMetric"] {
@@ -199,9 +208,7 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V6.4.2")
-    st.markdown("*RSI rebound watchlist engine*")
-    st.divider()
+    st.markdown("### 🔥 SwingIt")
 
     universe = st.selectbox(
         "Universe",
@@ -223,48 +230,45 @@ with st.sidebar:
             "SOXX Holdings",
             "Custom list",
         ],
-        help="Choose the stock universe to rank. SwingIt Elite combines broad-market and growth ETF-style lists while removing duplicates."
+        help="Choose the group to scan. The app now scans the full selected universe by default."
     )
     if universe == "Custom list":
         custom_input = st.text_area(
-            "Enter tickers",
+            "Custom tickers",
             placeholder="ORCL, ADBE, AMZN, MSFT",
+            height=80,
             help="Comma, semicolon, or newline separated."
         )
 
-    max_results = st.slider("Max tickers to scan", 25, 1500, 500, step=25)
+    st.caption("Scans the full selected universe. Larger universes may take longer.")
 
-    st.divider()
-    st.markdown("#### Model settings")
-    profit_target = st.select_slider(
-        "Swing profit goal",
-        options=[5, 8, 10, 12, 15, 20],
-        value=8,
-        help="A historical RSI panic event counts as a useful swing if the stock reached at least this max closing-price bounce within the selected window."
-    )
-    bounce_window = st.select_slider(
-        "Swing window",
-        options=[10, 15, 20, 30, 45, 60],
-        value=30,
-        help="How many trading days after the oversold low to measure the best closing-price bounce. For your 1–4 week style, 20–30 is usually the sweet spot."
-    )
+    with st.expander("Model settings", expanded=True):
+        profit_target = st.select_slider(
+            "Profit goal",
+            options=[5, 8, 10, 12, 15, 20],
+            value=8,
+            help="A historical RSI panic event counts as useful if it reached this max closing-price bounce within the selected window."
+        )
+        bounce_window = st.select_slider(
+            "Swing window",
+            options=[10, 15, 20, 30, 45, 60],
+            value=30,
+            help="Trading days after the oversold low to measure the best closing-price bounce."
+        )
+        spring_timeframe = st.selectbox(
+            "TTM timeframe",
+            ["1D", "1H"],
+            index=0,
+            help="1D is better for 1–4 week swing context. 1H is better for near-term timing/watchlist urgency."
+        )
+        include_news = st.toggle(
+            "News/catalyst score",
+            value=True,
+            help="Adds lightweight Yahoo Finance headline scoring. Turn off if a large scan feels slow."
+        )
 
-    include_news = st.toggle(
-        "Add catalyst/news score",
-        value=True,
-        help="Adds a lightweight Yahoo Finance headline catalyst score. It can slow the scan a little, so turn it off if the app feels laggy."
-    )
-
-    spring_timeframe = st.selectbox(
-        "TTM Spring timeframe",
-        ["1D", "1H"],
-        index=0,
-        help="1D is better for 1–4 week swing context. 1H is better for near-term timing/watchlist urgency."
-    )
-
-    st.divider()
     run = st.button("Run Swing Scan", use_container_width=True)
-    st.caption("Tip: this app is designed to find stocks worth watching, not to make entry decisions for you.")
+    st.caption("Watchlist engine only — use ToS for entry/exit decisions.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2007,7 +2011,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V6")
+st.markdown("# 🔥 SwingIt V6.5")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
@@ -2016,10 +2020,9 @@ if run:
         st.warning("No tickers found. Check your custom list or choose another universe.")
         st.stop()
 
-    tickers = all_tickers[:max_results]
+    tickers = all_tickers
     st.session_state.scan_meta = {
         "universe": universe,
-        "max_results": max_results,
         "profit_target": profit_target,
         "bounce_window": bounce_window,
         "include_news": include_news,
@@ -2029,7 +2032,7 @@ if run:
         "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
     }
 
-    st.info(f"Scanning {len(tickers)} tickers from {universe}…")
+    st.info(f"Scanning full universe: {len(tickers)} tickers from {universe}…")
     progress = st.progress(0)
     status = st.empty()
 
