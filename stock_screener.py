@@ -1,5 +1,5 @@
 """
-SwingIt V9 — Trading Terminal UI, Favorites, CSV, Faster Scans
+SwingIt V9.2 — Trading Terminal UI, Favorites, CSV, Faster Scans
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V9",
+    page_title="SwingIt V9.2",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -265,8 +265,8 @@ UNIVERSE_HINTS = {
     "S&P 500": "Large-cap U.S. stocks",
     "NASDAQ 100": "Nasdaq-100 growth leaders",
     "Dow Jones 30": "Blue-chip Dow names",
-    "Russell 1000": "Large and mid-cap U.S. stocks via IWB proxy",
-    "Russell 3000": "Broad U.S. market via IWV proxy",
+    "Russell 1000": "Top 1,000 U.S. listed stocks by market cap",
+    "Russell 3000": "Top 3,000 U.S. listed stocks by market cap",
     "FXAIX / VOO Holdings": "S&P 500 style holdings",
     "VTI Holdings": "Total-market style holdings via ITOT proxy",
     "QQQM Holdings": "Nasdaq-100 ETF holdings",
@@ -280,7 +280,7 @@ UNIVERSE_HINTS = {
 st.markdown(
     """
     <div class="terminal-hero">
-        <div class="terminal-title">🔥 SwingIt V9</div>
+        <div class="terminal-title">🔥 SwingIt V9.2</div>
         <div class="terminal-subtitle">A cleaner trading-terminal layout for finding RSI panic rebound candidates.</div>
     </div>
     """,
@@ -452,6 +452,114 @@ def get_nasdaq100():
 
 
 
+
+def parse_market_cap(value):
+    """Parse market cap values from Nasdaq screener responses."""
+    if value is None or pd.isna(value):
+        return 0.0
+    text = str(value).strip().replace("$", "").replace(",", "")
+    if not text or text.lower() in {"nan", "none", "n/a", "--"}:
+        return 0.0
+    multiplier = 1.0
+    last = text[-1].upper()
+    if last == "T":
+        multiplier = 1_000_000_000_000
+        text = text[:-1]
+    elif last == "B":
+        multiplier = 1_000_000_000
+        text = text[:-1]
+    elif last == "M":
+        multiplier = 1_000_000
+        text = text[:-1]
+    try:
+        return float(text) * multiplier
+    except Exception:
+        return 0.0
+
+
+def clean_yahoo_ticker(raw):
+    """Convert common data-source ticker formats into yfinance-friendly symbols."""
+    if raw is None or pd.isna(raw):
+        return ""
+    t = str(raw).strip().upper()
+    # Nasdaq often uses BRK/A while yfinance wants BRK-A.
+    t = t.replace("/", "-").replace(".", "-")
+    # Remove common non-common-stock suffix clutter.
+    if not t or t in {"-", "--", "N/A", "NA", "NULL"}:
+        return ""
+    if any(x in t for x in ["^", " "]):
+        return ""
+    return t
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_nasdaq_stock_screener_df():
+    """Download a broad U.S. listed-stock universe from Nasdaq as a robust fallback.
+
+    ETF issuer holdings files can be fragile on Streamlit Cloud. This source is
+    used to build Russell-style approximations by market cap so Russell 1000 and
+    Russell 3000 do not collapse back to a 528-name curated fallback.
+    """
+    url = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000&offset=0&download=true"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+        "Origin": "https://www.nasdaq.com",
+        "Referer": "https://www.nasdaq.com/market-activity/stocks/screener",
+    }
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+
+    # Nasdaq usually returns JSON, but this keeps us safe if it ever returns CSV.
+    try:
+        payload = response.json()
+        rows = payload.get("data", {}).get("rows", [])
+        df = pd.DataFrame(rows)
+    except Exception:
+        df = pd.read_csv(StringIO(response.text))
+
+    if df.empty:
+        raise RuntimeError("Nasdaq screener returned no rows.")
+
+    # Normalize column names but keep original values.
+    df.columns = [str(c).strip() for c in df.columns]
+    lower_map = {c.lower().replace(" ", "").replace("_", ""): c for c in df.columns}
+
+    symbol_col = lower_map.get("symbol") or lower_map.get("ticker")
+    if not symbol_col:
+        raise RuntimeError(f"Could not find symbol column in Nasdaq screener columns: {list(df.columns)}")
+
+    name_col = lower_map.get("name") or lower_map.get("companyname") or symbol_col
+    market_col = lower_map.get("marketcap") or lower_map.get("marketcap") or lower_map.get("marketcapitalization")
+    etf_col = lower_map.get("etf")
+    country_col = lower_map.get("country")
+
+    out = pd.DataFrame()
+    out["Ticker"] = df[symbol_col].apply(clean_yahoo_ticker)
+    out["Name"] = df[name_col].astype(str) if name_col in df.columns else out["Ticker"]
+    out["MarketCap"] = df[market_col].apply(parse_market_cap) if market_col in df.columns else 0.0
+    out["ETF"] = df[etf_col].astype(str).str.upper() if etf_col in df.columns else "N"
+    out["Country"] = df[country_col].astype(str) if country_col in df.columns else "United States"
+
+    out = out[out["Ticker"].astype(bool)].copy()
+    out = out[~out["Ticker"].str.contains(r"[.$^ ]", regex=True, na=False)]
+    out = out[out["Ticker"].str.len() <= 7]
+    # Keep ordinary stocks; remove ETFs when Nasdaq provides the flag.
+    out = out[~out["ETF"].isin(["Y", "TRUE", "1"])]
+    # Common obvious non-common-stock suffixes. Conservative so we don't delete class shares like BRK-B.
+    out = out[~out["Ticker"].str.endswith(("-WS", "-WT", "-W", "-U", "-R"), na=False)]
+    out = out.drop_duplicates("Ticker").sort_values("MarketCap", ascending=False)
+    return out
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_broad_us_tickers(limit=None):
+    df = get_nasdaq_stock_screener_df()
+    if limit:
+        df = df.head(int(limit))
+    return df["Ticker"].tolist()
+
+
 ISHARES_PRODUCTS = {
     # ticker: (product_id, product_slug)
     "IWB": ("239707", "ishares-russell-1000-etf"),
@@ -546,31 +654,42 @@ def get_ishares_holdings(product_id: str, ticker: str):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_russell1000():
+    # Russell 1000 approximation: top 1,000 U.S. listed common stocks by market cap.
+    # This is more reliable on Streamlit Cloud than fragile ETF holdings downloads.
     try:
-        return get_ishares_holdings("239707", "IWB")
+        return get_broad_us_tickers(1000)
     except Exception:
-        # Fallback: better than failing, but label/source will show this is approximate.
-        return dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY)
+        try:
+            return get_ishares_holdings("239707", "IWB")
+        except Exception:
+            return dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_russell3000():
+    # Russell 3000 approximation: top 3,000 U.S. listed common stocks by market cap.
     try:
-        return get_ishares_holdings("239714", "IWV")
+        return get_broad_us_tickers(3000)
     except Exception:
-        # ITOT is another broad-market proxy and often has ~2,500 holdings.
         try:
-            return get_ishares_holdings("239724", "ITOT")
+            return get_ishares_holdings("239714", "IWV")
         except Exception:
-            return dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY + SCHG_NAMES + VGT_NAMES + SMH_NAMES + SOXX_NAMES)
+            try:
+                return get_ishares_holdings("239724", "ITOT")
+            except Exception:
+                return dedupe(get_sp500() + get_nasdaq100() + GROWTH_CORE + HIGH_OPPORTUNITY + SCHG_NAMES + VGT_NAMES + SMH_NAMES + SOXX_NAMES)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_total_market():
+    # VTI-style broad market proxy. Keep it broad but bounded for scanning speed.
     try:
-        return get_ishares_holdings("239724", "ITOT")
+        return get_broad_us_tickers(3000)
     except Exception:
-        return get_russell3000()
+        try:
+            return get_ishares_holdings("239724", "ITOT")
+        except Exception:
+            return get_russell3000()
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
