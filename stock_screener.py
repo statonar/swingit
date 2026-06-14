@@ -1616,11 +1616,66 @@ def clean_label(value):
 
 def dot_class(value):
     text = clean_label(value).lower()
-    if any(w in text for w in ["high", "positive", "fresh", "fired up", "loaded & improving", "improving", "oversold"]):
-        return "dot-green"
-    if any(w in text for w in ["negative", "fired down", "accelerating down", "falling", "weakening", "low"]):
+
+    # Numeric context first — this lets card rows like "3.6x RVOL",
+    # "+8.88% in 16d", "100% remaining", and "10 events" color correctly.
+    pct_match = re.search(r"(-?\d+(?:\.\d+)?)\s*%", text)
+    if pct_match:
+        pct = float(pct_match.group(1))
+        if "remaining" in text:
+            if pct >= 70:
+                return "dot-green"
+            if pct >= 40:
+                return "dot-yellow"
+            if pct >= 20:
+                return "dot-yellow"
+            return "dot-red"
+        # Potential / bounce percent
+        if pct >= 8:
+            return "dot-green"
+        if pct >= 5:
+            return "dot-yellow"
+        if pct > 0:
+            return "dot-gray"
         return "dot-red"
-    if any(w in text for w in ["medium", "watch", "neutral", "early", "mixed", "recent", "panic"]):
+
+    rvol_match = re.search(r"(\d+(?:\.\d+)?)\s*x", text)
+    if rvol_match:
+        rvol = float(rvol_match.group(1))
+        if rvol >= 1.5:
+            return "dot-green"
+        if rvol >= 1.0:
+            return "dot-yellow"
+        if rvol >= 0.8:
+            return "dot-gray"
+        return "dot-red"
+
+    events_match = re.search(r"(\d+)\s*events?", text)
+    if events_match:
+        events = int(events_match.group(1))
+        if events >= 6:
+            return "dot-green"
+        if events >= 3:
+            return "dot-yellow"
+        if events >= 1:
+            return "dot-red"
+        return "dot-gray"
+
+    if any(w in text for w in [
+        "high", "positive", "fresh", "fired up", "loaded & improving",
+        "building fast", "building", "improving", "oversold", "turn zone",
+        "very early", "early reversal"
+    ]):
+        return "dot-green"
+    if any(w in text for w in [
+        "negative", "fired down", "accelerating down", "falling", "weakening",
+        "fading", "low", "extended"
+    ]):
+        return "dot-red"
+    if any(w in text for w in [
+        "medium", "watch", "neutral", "early", "mixed", "recent", "panic",
+        "developing", "slight build", "flat"
+    ]):
         return "dot-yellow"
     return "dot-gray"
 
@@ -1856,12 +1911,12 @@ def hot_card(rank, row):
             <div class="score-tile hover-tip"><div class="score-num">{spring_score}</div><div class="score-label">Spring</div><div class="tip-box">{spring_score_tip}</div></div>
         </div>
         <div class="hot-meta">
-            {hover_item('Price', f'{current_price} → {potential_price}', price_tip)}
+            {hover_item('Price', f'{current_price} → {potential_price}', price_tip, dot=True)}
             {hover_item('RSI', f'{rsi} · {clean_label(opportunity)}', rsi_tip, dot=True)}
             {hover_item('Stage', clean_label(rebound_stage), stage_tip, dot=True)}
-            {hover_item('Potential', f'+{avg_max}% in {avg_days}d avg', bounce_tip)}
+            {hover_item('Potential', f'+{avg_max}% in {avg_days}d avg', bounce_tip, dot=True)}
             {hover_item('Remaining', clean_label(opportunity_remaining), remaining_tip, dot=True)}
-            {hover_item('History', history, history_tip)}
+            {hover_item('History', history, history_tip, dot=True)}
             {hover_item('Attention', clean_label(attention), attention_tip, dot=True)}
             {hover_item('Volume trend', clean_label(volume_trend), volume_trend_tip, dot=True)}
             {hover_item('Spring', f'{spring_tf} · {clean_label(spring)}', spring_score_tip, dot=True)}
