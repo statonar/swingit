@@ -1,5 +1,5 @@
 """
-SwingIt V3.2 — RSI Rebound Probability Engine
+SwingIt V3.3 — RSI Panic Swing Outcome Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -27,7 +27,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V3.2",
+    page_title="SwingIt V3.3",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -130,7 +130,7 @@ if "scan_meta" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V3")
+    st.markdown("## 🔥 SwingIt V3.3")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -150,17 +150,17 @@ with st.sidebar:
 
     st.divider()
     st.markdown("#### Model settings")
-    rsi_target = st.select_slider(
-        "Rebound target RSI",
-        options=[45, 50, 55, 60],
-        value=50,
-        help="50 is a practical neutral-momentum target. 55/60 are stricter and favor stronger rebound histories."
+    profit_target = st.select_slider(
+        "Swing profit goal",
+        options=[5, 8, 10, 12, 15, 20],
+        value=8,
+        help="A historical RSI panic event counts as a useful swing if the stock reached at least this max closing-price bounce within the selected window."
     )
     bounce_window = st.select_slider(
-        "Bounce window",
+        "Swing window",
         options=[10, 15, 20, 30, 45, 60],
         value=30,
-        help="How many trading days after the oversold low to measure the best closing-price bounce."
+        help="How many trading days after the oversold low to measure the best closing-price bounce. For your 1–4 week style, 20–30 is usually the sweet spot."
     )
 
     include_news = st.toggle(
@@ -326,17 +326,23 @@ def normalize_ohlcv(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
 # ──────────────────────────────────────────────────────────────────────────────
 # RSI rebound analysis
 # ──────────────────────────────────────────────────────────────────────────────
-def analyze_rsi_rebounds(close, rsi_series, target_level=50, bounce_days=30, oversold_level=30):
+def analyze_rsi_swing_outcomes(close, rsi_series, profit_target=8, bounce_days=30, oversold_level=30):
+    """Simulates what happened after each RSI <30 panic event.
+
+    This intentionally scores trade-like outcomes instead of asking whether RSI
+    eventually recovered to 50/60. A useful swing is one that produced a
+    meaningful max closing-price bounce inside the chosen window.
+    """
     empty = {
         "events": [],
         "event_count": 0,
-        "target_recovery_rate": None,
-        "avg_days_to_target": None,
-        "avg_gain_to_target_pct": None,
+        "profitable_event_count": 0,
+        "swing_success_rate": None,
         "avg_max_bounce_pct": None,
         "avg_days_to_max_bounce": None,
         "avg_lowest_rsi": None,
         "avg_post_low_drawdown_pct": None,
+        "avg_risk_reward": None,
         "history_score": 0,
     }
 
@@ -361,43 +367,34 @@ def analyze_rsi_rebounds(close, rsi_series, target_level=50, bounce_days=30, ove
             low_close = float(data.loc[low_date, "close"])
             lowest_rsi = float(oversold_slice["rsi"].min())
 
-            target_pos = None
-            for j in range(end_pos + 1, n):
-                if data["rsi"].iloc[j] >= target_level:
-                    target_pos = j
-                    break
-
-            hit_target = target_pos is not None
-            target_date = data.index[target_pos] if hit_target else None
-            target_close = float(data["close"].iloc[target_pos]) if hit_target else None
-            days_to_target = int(target_pos - low_pos) if hit_target else None
-            gain_to_target = ((target_close / low_close) - 1) * 100 if hit_target and low_close else None
-
             window_end = min(n - 1, low_pos + int(bounce_days))
             bounce_slice = data.iloc[low_pos:window_end + 1]
+
             max_date = bounce_slice["close"].idxmax()
             max_pos = data.index.get_loc(max_date)
             max_close = float(data.loc[max_date, "close"])
             max_bounce = ((max_close / low_close) - 1) * 100 if low_close else None
             days_to_max = int(max_pos - low_pos)
 
-            drawdown_end = target_pos if hit_target else window_end
-            dd_slice = data.iloc[low_pos:drawdown_end + 1]
-            min_after = float(dd_slice["close"].min())
+            min_after = float(bounce_slice["close"].min())
             post_low_dd = ((min_after / low_close) - 1) * 100 if low_close else None
+
+            profitable_swing = bool(max_bounce is not None and max_bounce >= profit_target)
+            risk_reward = None
+            if max_bounce is not None and post_low_dd is not None:
+                downside = abs(min(post_low_dd, 0))
+                risk_reward = max_bounce / downside if downside > 0 else max_bounce
 
             events.append({
                 "Start Date": data.index[start_pos].date(),
                 "RSI Low Date": low_date.date(),
                 "Lowest RSI": round(lowest_rsi, 1),
                 "Low Close": round(low_close, 2),
-                f"Hit RSI {target_level}": hit_target,
-                f"Days to RSI {target_level}": days_to_target,
-                f"Gain to RSI {target_level} %": round(gain_to_target, 2) if gain_to_target is not None else None,
+                "Profitable Swing": profitable_swing,
                 f"Max {bounce_days}D Bounce %": round(max_bounce, 2) if max_bounce is not None else None,
                 f"Days to Max {bounce_days}D Bounce": days_to_max,
                 "Post-Low Drawdown %": round(post_low_dd, 2) if post_low_dd is not None else None,
-                "Target Date": target_date.date() if target_date is not None else None,
+                "Risk / Reward": round(risk_reward, 2) if risk_reward is not None else None,
                 f"Max {bounce_days}D Date": max_date.date(),
             })
         i += 1
@@ -406,46 +403,47 @@ def analyze_rsi_rebounds(close, rsi_series, target_level=50, bounce_days=30, ove
     if event_count == 0:
         return empty
 
-    hits = [e for e in events if e[f"Hit RSI {target_level}"]]
-    recovery_rate = len(hits) / event_count * 100
+    profitable_events = [e for e in events if e["Profitable Swing"]]
+    success_rate = len(profitable_events) / event_count * 100
 
-    avg_days = pd.Series([e[f"Days to RSI {target_level}"] for e in hits]).mean() if hits else None
-    avg_gain = pd.Series([e[f"Gain to RSI {target_level} %"] for e in hits]).mean() if hits else None
     avg_bounce = pd.Series([e[f"Max {bounce_days}D Bounce %"] for e in events]).mean()
     avg_days_max = pd.Series([e[f"Days to Max {bounce_days}D Bounce"] for e in events]).mean()
     avg_lowest_rsi = pd.Series([e["Lowest RSI"] for e in events]).mean()
     avg_dd = pd.Series([e["Post-Low Drawdown %"] for e in events]).mean()
+    avg_rr = pd.Series([e["Risk / Reward"] for e in events if e["Risk / Reward"] is not None]).mean()
 
-    recovery_component = recovery_rate
-    bounce_component = clamp((avg_bounce / 15) * 100) if not pd.isna(avg_bounce) else 0
-    target_gain_component = clamp((avg_gain / 10) * 100) if avg_gain is not None and not pd.isna(avg_gain) else 0
-    speed_component = speed_score(avg_days)
-    days_max_component = days_to_max_score(avg_days_max)
+    # History Score = would this stock historically have rewarded buying RSI panic
+    # for a 1–4 week swing? It focuses on money outcomes, not indicator recovery.
+    success_component = success_rate
+    bounce_component = clamp((avg_bounce / max(profit_target * 2, 1)) * 100) if not pd.isna(avg_bounce) else 0
+    speed_component = days_to_max_score(avg_days_max)
     depth_component = clamp(((30 - avg_lowest_rsi) / 15) * 100) if not pd.isna(avg_lowest_rsi) else 0
-    sample_component = clamp((min(event_count, 6) / 6) * 100)
-    drawdown_penalty = clamp(abs(min(avg_dd, 0)) * 2.5, 0, 15) if not pd.isna(avg_dd) else 0
+    sample_component = clamp((min(event_count, 8) / 8) * 100)
+    rr_component = clamp((avg_rr / 3) * 100) if not pd.isna(avg_rr) else 0
+
+    # Penalize stocks that keep falling hard after the RSI panic low.
+    drawdown_penalty = clamp(abs(min(avg_dd, 0)) * 2.2, 0, 22) if not pd.isna(avg_dd) else 0
 
     history_score = (
-        0.20 * recovery_component
-        + 0.22 * bounce_component
-        + 0.13 * target_gain_component
-        + 0.13 * speed_component
-        + 0.12 * days_max_component
+        0.28 * success_component
+        + 0.25 * bounce_component
+        + 0.17 * speed_component
+        + 0.10 * sample_component
         + 0.08 * depth_component
-        + 0.12 * sample_component
+        + 0.12 * rr_component
         - drawdown_penalty
     )
 
     return {
         "events": events,
         "event_count": event_count,
-        "target_recovery_rate": round(recovery_rate, 1),
-        "avg_days_to_target": round(float(avg_days), 1) if avg_days is not None and not pd.isna(avg_days) else None,
-        "avg_gain_to_target_pct": round(float(avg_gain), 2) if avg_gain is not None and not pd.isna(avg_gain) else None,
+        "profitable_event_count": len(profitable_events),
+        "swing_success_rate": round(success_rate, 1),
         "avg_max_bounce_pct": round(float(avg_bounce), 2) if not pd.isna(avg_bounce) else None,
         "avg_days_to_max_bounce": round(float(avg_days_max), 1) if not pd.isna(avg_days_max) else None,
         "avg_lowest_rsi": round(float(avg_lowest_rsi), 1) if not pd.isna(avg_lowest_rsi) else None,
         "avg_post_low_drawdown_pct": round(float(avg_dd), 2) if not pd.isna(avg_dd) else None,
+        "avg_risk_reward": round(float(avg_rr), 2) if not pd.isna(avg_rr) else None,
         "history_score": int(round(clamp(history_score))),
     }
 
@@ -567,7 +565,7 @@ def confidence_from_history(event_count, recovery_rate):
     return score, label
 
 @st.cache_data(ttl=300, show_spinner=False)
-def compute_candidate(ticker: str, target_level: int, bounce_days: int, include_news_lookup: bool = True):
+def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include_news_lookup: bool = True):
     try:
         raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True, threads=False)
         df = normalize_ohlcv(raw, ticker)
@@ -583,11 +581,11 @@ def compute_candidate(ticker: str, target_level: int, bounce_days: int, include_
         current_price = float(close.iloc[-1])
         current_rsi = float(rsi_series.dropna().iloc[-1]) if not rsi_series.dropna().empty else None
         opp_score = current_rsi_opportunity_score(current_rsi)
-        rebounds = analyze_rsi_rebounds(close, rsi_series, target_level=target_level, bounce_days=bounce_days)
+        rebounds = analyze_rsi_swing_outcomes(close, rsi_series, profit_target=profit_target, bounce_days=bounce_days)
         history_score = rebounds["history_score"]
         confidence_score, confidence_label = confidence_from_history(
             rebounds.get("event_count", 0),
-            rebounds.get("target_recovery_rate"),
+            rebounds.get("swing_success_rate"),
         )
 
         # Swing score = historical edge + current opportunity.
@@ -734,7 +732,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V3.2")
+st.markdown("# 🔥 SwingIt V3.3")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
@@ -747,7 +745,7 @@ if run:
     st.session_state.scan_meta = {
         "universe": universe,
         "max_results": max_results,
-        "rsi_target": rsi_target,
+        "profit_target": profit_target,
         "bounce_window": bounce_window,
         "include_news": include_news,
         "tickers_scanned": len(tickers),
@@ -761,7 +759,7 @@ if run:
     results = []
     for i, ticker in enumerate(tickers):
         status.caption(f"Checking {ticker}…")
-        candidate = compute_candidate(ticker, rsi_target, bounce_window, include_news)
+        candidate = compute_candidate(ticker, profit_target, bounce_window, include_news)
         if candidate:
             results.append(candidate)
         progress.progress((i + 1) / len(tickers))
@@ -773,7 +771,7 @@ if run:
 # If no scan has been run yet, show landing state.
 if st.session_state.scan_results is None:
     st.markdown(
-        f"<div class='small-muted'>Choose a universe, then run the scan to rank 1–4 week RSI rebound swing candidates.</div>",
+        f"<div class='small-muted'>Choose a universe, then run the scan to rank 1–4 week RSI panic swing candidates.</div>",
         unsafe_allow_html=True,
     )
     st.divider()
@@ -792,18 +790,18 @@ if st.session_state.scan_results is None:
 results = st.session_state.scan_results or []
 meta = st.session_state.scan_meta or {
     "universe": universe,
-    "rsi_target": rsi_target,
+    "profit_target": profit_target,
     "bounce_window": bounce_window,
     "tickers_scanned": 0,
     "run_date": "current session",
 }
 active_universe = meta.get("universe", universe)
-active_rsi_target = meta.get("rsi_target", rsi_target)
+active_profit_target = meta.get("profit_target", profit_target)
 active_bounce_window = meta.get("bounce_window", bounce_window)
 active_tickers_scanned = meta.get("tickers_scanned", 0)
 
 st.markdown(
-    f"<div class='small-muted'>Latest scan: {active_universe} · Target RSI {active_rsi_target} · Max bounce window {active_bounce_window} trading days · {meta.get('run_date', '')}</div>",
+    f"<div class='small-muted'>Latest scan: {active_universe} · Profit goal {active_profit_target}% · Swing window {active_bounce_window} trading days · {meta.get('run_date', '')}</div>",
     unsafe_allow_html=True,
 )
 st.divider()
@@ -824,8 +822,9 @@ for r in results:
         "Potential Swing Price": r.get("potential_sell_price"),
         "Avg Max Bounce": r.get("avg_max_bounce_pct"),
         "Avg Days to Max": r.get("avg_days_to_max_bounce"),
-        f"Avg Gain to RSI {active_rsi_target}": r.get("avg_gain_to_target_pct"),
-        f"Avg Days to RSI {active_rsi_target}": r.get("avg_days_to_target"),
+        "Successful Swings": r.get("profitable_event_count"),
+        "Win Rate": r.get("swing_success_rate"),
+        "Risk / Reward": r.get("avg_risk_reward"),
         "History": f"{r.get('event_count', 0)} events",
         "Confidence": r.get("confidence_label"),
         "Confidence Score": r.get("confidence_score"),
@@ -880,7 +879,7 @@ compact_cols = [
     "Ticker", "Swing Score", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "News"
 ]
 research_cols = compact_cols + [
-    "Headline", f"Avg Gain to RSI {active_rsi_target}", f"Avg Days to RSI {active_rsi_target}", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -896,30 +895,39 @@ st.dataframe(
         "Price": st.column_config.NumberColumn(format="$%.2f"),
         "Potential Swing Price": st.column_config.NumberColumn(format="$%.2f"),
         "Avg Max Bounce": st.column_config.NumberColumn(format="%.1f%%"),
-        f"Avg Gain to RSI {active_rsi_target}": st.column_config.NumberColumn(format="%.1f%%"),
+        "Win Rate": st.column_config.NumberColumn(format="%.1f%%"),
+        "Risk / Reward": st.column_config.NumberColumn(format="%.2f"),
         "Avg Drawdown After Low": st.column_config.NumberColumn(format="%.1f%%"),
     },
 )
 
 with st.expander("What the Swing Score means"):
     st.markdown(f"""
-    **Swing Score** combines two ideas:
+    **Swing Score** is now a historical swing-outcome score, not an RSI recovery score.
+
+    It combines:
 
     **1. Current opportunity score** — how close the stock is to an actionable RSI rebound zone right now. RSI under 30 scores highest; RSI 30–40 is still watchable; RSI above 50 scores low because it may have already recovered.
 
-    **2. Historical rebound score** — what happened the last times this stock fell below RSI 30. It uses recovery frequency to RSI {active_rsi_target}, average gain to RSI {active_rsi_target}, average max bounce within {active_bounce_window} trading days, speed of recovery, days to max bounce, oversold depth, sample size, and a drawdown penalty.
+    **2. Historical swing outcome score** — what happened after prior RSI&lt;30 panic events. The model now asks: *within {active_bounce_window} trading days after the panic low, did this stock create a tradeable bounce?*
+
+    The historical score uses:
+    - **Win rate**: how often prior panic events reached at least the selected {active_profit_target}% swing profit goal.
+    - **Average max bounce**: average best closing-price rebound within the selected window.
+    - **Average days to max bounce**: faster rebounds score better for a 1–4 week swing style.
+    - **Risk / reward**: average bounce compared with additional drawdown after the panic low.
+    - **Oversold depth**: deeper RSI washouts that recovered can add strength.
+    - **Sample size**: more events improve the evidence quality.
+    - **Drawdown penalty**: stocks that kept falling hard after RSI panic lose points.
 
     **Panic zone** means current RSI is below 25. It is the most washed-out bucket in the model. It can be powerful, but it can also still be falling, so it should be treated as “high alert,” not an automatic buy.
 
-    **Confidence** is separate from Swing Score. Low confidence means only 1–2 prior RSI&lt;30 events, Medium means 3–5 events, and High means 6+ events. A low-confidence setup can still be interesting, but it should not carry the same weight as a repeated pattern.
+    **Confidence** is separate from Swing Score. Low confidence means only 1–2 prior RSI&lt;30 events, Medium means 3–5 events, and High means 6+ events.
 
-    **Potential Swing Price** is not a price target from an analyst. It is simply current price plus the stock’s own average max bounce after prior RSI&lt;30 events within the selected bounce window.
-
-    **News** is a lightweight headline keyword snapshot from Yahoo Finance. It is useful context, but it is not a real sentiment model. Click into the news before trusting the label.
+    **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
     This is meant to produce a **watchlist**, not a buy signal. Entries should still come from price action, VWAP, volume, support/reclaim behavior, and your 5m/15m process.
     """)
-
 st.divider()
 st.markdown("## Ticker Detail")
 selected = st.selectbox("Inspect ticker", display["Ticker"].tolist(), key="ticker_detail_select")
@@ -955,7 +963,7 @@ if detail:
 
     st.plotly_chart(mini_chart(detail), use_container_width=True)
 
-    st.markdown("### RSI <30 rebound history")
+    st.markdown("### Historical swing outcomes after RSI panic")
     events = detail.get("events", [])
     if events:
         st.dataframe(pd.DataFrame(events), use_container_width=True, hide_index=True, height=260)
@@ -968,6 +976,6 @@ csv = export.to_csv(index=False)
 st.download_button(
     "Download watchlist CSV",
     data=csv,
-    file_name=f"swingit_v3_2_{datetime.date.today()}.csv",
+    file_name=f"swingit_v3_3_{datetime.date.today()}.csv",
     mime="text/csv",
 )
