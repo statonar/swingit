@@ -1508,7 +1508,7 @@ def _risk_reward_score(rr):
 
 
 def add_ranking_scores(frame: pd.DataFrame, target_pct: float, window_days: int) -> pd.DataFrame:
-    """Adds four ranking lenses without changing the underlying scan data."""
+    """Adds four view-by lenses without changing the underlying scan data."""
     if frame.empty:
         return frame
     out = frame.copy()
@@ -2159,26 +2159,6 @@ for r in results:
 df = pd.DataFrame(rows)
 df = add_ranking_scores(df, active_profit_target, active_bounce_window)
 
-st.markdown("### Ranking mode")
-rank_col_ui, rank_help_col = st.columns([1.4, 2.6])
-with rank_col_ui:
-    ranking_mode = st.selectbox(
-        "What should #1 mean?",
-        RANKING_MODES,
-        index=0,
-        key="ranking_mode_selector",
-        help="Change the lens without rerunning the scan.",
-    )
-with rank_help_col:
-    st.markdown(
-        f"<div class='small-muted' style='padding-top:1.9rem;'>{_safe_html(RANKING_HELP.get(ranking_mode, ''))}</div>",
-        unsafe_allow_html=True,
-    )
-
-rank_col = ranking_column_for(ranking_mode)
-df_sorted = df.sort_values([rank_col, "Setup Quality", "Swing Score", "RSI"], ascending=[False, False, False, True], na_position="last").reset_index(drop=True)
-df_sorted["Active Rank Score"] = pd.to_numeric(df_sorted[rank_col], errors="coerce").fillna(0).round(0).astype(int)
-
 # Top summary metrics — clickable filter cards
 rsi_under_40_count = int((pd.to_numeric(df["RSI"], errors="coerce") < 40).sum())
 high_conf_count = int(df["Confidence"].astype(str).str.contains("High", na=False).sum())
@@ -2191,7 +2171,7 @@ with fc1:
     if st.button("Show scanned", use_container_width=True, key="filter_scanned"):
         st.session_state.leaderboard_filter = "All"
 with fc2:
-    st.metric("Usable results", len(df_sorted))
+    st.metric("Usable results", len(df))
     if st.button("Show usable", use_container_width=True, key="filter_usable"):
         st.session_state.leaderboard_filter = "All"
 with fc3:
@@ -2206,6 +2186,27 @@ with fc5:
     st.metric("Setup ≥75", setup_75_count)
     if st.button("Show setup ≥75", use_container_width=True, key="filter_setup75"):
         st.session_state.leaderboard_filter = "Setup ≥75"
+
+st.markdown("### 🎯 View By")
+rank_col_ui, rank_help_col = st.columns([1.4, 2.6])
+with rank_col_ui:
+    ranking_mode = st.selectbox(
+        "Choose how to rank the watchlist",
+        RANKING_MODES,
+        index=0,
+        key="ranking_mode_selector",
+        help="Choose how SwingIt ranks your watchlist without rerunning the scan.",
+    )
+with rank_help_col:
+    st.markdown(
+        f"<div class='small-muted' style='padding-top:1.9rem;'>{_safe_html(RANKING_HELP.get(ranking_mode, ''))}</div>",
+        unsafe_allow_html=True,
+    )
+
+rank_col = ranking_column_for(ranking_mode)
+df_sorted = df.sort_values([rank_col, "Setup Quality", "Swing Score", "RSI"], ascending=[False, False, False, True], na_position="last").reset_index(drop=True)
+df_sorted["Active Rank Score"] = pd.to_numeric(df_sorted[rank_col], errors="coerce").fillna(0).round(0).astype(int)
+
 
 active_filter = st.session_state.get("leaderboard_filter", "All")
 
@@ -2229,7 +2230,7 @@ if active_filter != "All":
             st.rerun()
 
 st.markdown("## 🔥 Best Swing Opportunities")
-st.caption(f"Top 10 ranked by **{ranking_mode}**. Change the ranking mode above to ask a different question.")
+st.caption(f"Top 10 viewed by **{ranking_mode}**. Change View By above to ask a different question.")
 top = filtered_df.head(10)
 if not top.empty:
     for start in range(0, len(top), 5):
@@ -2326,9 +2327,9 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V6.4 uses multiple ranking lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (20% current RSI opportunity, 25% Rebound Stage, 20% catalyst/news, 20% TTM Spring, 10% attention/RVOL, 5% volume trend).
+    Current V6.4 uses multiple view-by lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (20% current RSI opportunity, 25% Rebound Stage, 20% catalyst/news, 20% TTM Spring, 10% attention/RVOL, 5% volume trend).
 
-    **Ranking Mode** defines what #1 means. 🎯 Target Hunter is the default for your 8% swing goal; ⚡ Ready Now is for what to open in ThinkorSwim first; 🧠 Highest Confidence is the safest historical pattern; 🚀 Maximum Upside is the biggest reward lens. V6.4 also adds **Opportunity Remaining**, which estimates how much of the usual RSI-panic rebound may still be left from the most recent panic-cycle low.
+    **View By** defines what #1 means. 🎯 Target Hunter is the default for your 8% swing goal; ⚡ Ready Now is for what to open in ThinkorSwim first; 🧠 Highest Confidence is the safest historical pattern; 🚀 Maximum Upside is the biggest reward lens. V6.4 also adds **Opportunity Remaining**, which estimates how much of the usual RSI-panic rebound may still be left from the most recent panic-cycle low.
 
 **Setup ≥75** is the “open this in ThinkorSwim now” bucket. Stocks in the high 60s/low 70s are often the almost-there names — they may need one more thing, such as RSI slipping lower, a stronger spring turn, fresh news, or higher relative volume.
 
