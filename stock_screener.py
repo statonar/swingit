@@ -452,25 +452,17 @@ def get_nasdaq100():
 
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_ishares_holdings(product_id: str, ticker: str):
-    """Best-effort pull of current iShares holdings CSV.
+ISHARES_PRODUCTS = {
+    # ticker: (product_id, product_slug)
+    "IWB": ("239707", "ishares-russell-1000-etf"),
+    "IWV": ("239714", "ishares-russell-3000-etf"),
+    "ITOT": ("239724", "ishares-core-sp-total-us-stock-market-etf"),
+    "IVV": ("239726", "ishares-core-sp-500-etf"),
+}
 
-    Used for larger, more accurate universes such as Russell 1000 (IWB),
-    Russell 3000 (IWV), total market (ITOT), and S&P 500 ETF proxy (IVV).
-    Falls back elsewhere if BlackRock changes/blocks the download.
-    """
-    ticker = ticker.upper().strip()
-    url = (
-        f"https://www.ishares.com/us/products/{product_id}/"
-        f"1467271812596.ajax?fileType=csv&fileName={ticker}_holdings&dataType=fund"
-    )
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; SwingIt/7.1)"}
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
-    text = response.text
 
-    # iShares files include several metadata lines before the actual CSV header.
+def _extract_tickers_from_holdings_csv(text: str, ticker: str):
+    """Parse an iShares-style holdings CSV response into clean Yahoo tickers."""
     lines = text.splitlines()
     header_idx = None
     for i, line in enumerate(lines):
@@ -485,7 +477,6 @@ def get_ishares_holdings(product_id: str, ticker: str):
     df = pd.read_csv(StringIO(csv_text), engine="python")
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Column names vary slightly across iShares downloads.
     ticker_col = None
     for col in ["Ticker", "ticker", "Local Ticker", "Trading Ticker"]:
         if col in df.columns:
@@ -499,17 +490,58 @@ def get_ishares_holdings(product_id: str, ticker: str):
     if ticker_col is None:
         raise ValueError(f"Could not find ticker column for {ticker}.")
 
-    raw = df[ticker_col].dropna().astype(str).tolist()
     out = []
-    for t in raw:
-        t = t.strip().upper().replace(".", "-")
-        # Remove cash rows, currencies, empty symbols, and obvious non-equity placeholders.
+    for raw_ticker in df[ticker_col].dropna().astype(str).tolist():
+        t = raw_ticker.strip().upper().replace(".", "-")
         if not t or t in {"-", "--", "USD", "CASH", "US DOLLAR"}:
             continue
         if " " in t or len(t) > 7:
             continue
+        # Keep ordinary U.S. tickers and common class-share tickers after . -> - conversion.
         out.append(t)
     return dedupe(out)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_ishares_holdings(product_id: str, ticker: str):
+    """Best-effort pull of current iShares holdings CSV.
+
+    V9 accidentally used an incomplete iShares URL, so IWB/IWV/ITOT/IVV failed
+    and broad universes fell back to the ~528-name curated fallback. This version
+    uses the full product slug URL and then tries the old URL as a backup.
+    """
+    ticker = ticker.upper().strip()
+    slug = ISHARES_PRODUCTS.get(ticker, (product_id, ""))[1]
+
+    urls = []
+    if slug:
+        urls.append(
+            f"https://www.ishares.com/us/products/{product_id}/{slug}/"
+            f"1467271812596.ajax?fileType=csv&fileName={ticker}_holdings&dataType=fund"
+        )
+    urls.append(
+        f"https://www.ishares.com/us/products/{product_id}/"
+        f"1467271812596.ajax?fileType=csv&fileName={ticker}_holdings&dataType=fund"
+    )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Safari/537.36",
+        "Accept": "text/csv,application/csv,text/plain,*/*",
+    }
+
+    last_error = None
+    for url in urls:
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            tickers = _extract_tickers_from_holdings_csv(response.text, ticker)
+            if len(tickers) >= 25:
+                return tickers
+            last_error = ValueError(f"Only found {len(tickers)} holdings for {ticker}.")
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"Could not download {ticker} holdings. Last error: {last_error}")
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
