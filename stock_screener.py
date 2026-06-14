@@ -1,5 +1,5 @@
 """
-SwingIt V6.3 — Rebound Stage + Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V6.4 — Rebound Stage + Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V6.3",
+    page_title="SwingIt V6.4",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -198,7 +198,7 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V6.3")
+    st.markdown("## 🔥 SwingIt V6.4")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -538,6 +538,71 @@ def opportunity_label(current_rsi):
     if r < 60:
         return "Recovered"
     return "Extended"
+
+
+def opportunity_remaining_from_cycle(current_price, cycle_low_price, avg_max_bounce_pct):
+    """Estimate how much of the historical rebound move remains in the current RSI panic cycle.
+
+    Anchor = most recent RSI<30 event low close.
+    Target = anchor low close plus the stock's average max rebound after prior RSI panic events.
+    This avoids ranking names that already made most of their usual move.
+    """
+    try:
+        current = float(current_price)
+        low = float(cycle_low_price)
+        bounce = float(avg_max_bounce_pct)
+    except Exception:
+        return {
+            "opportunity_remaining_pct": None,
+            "opportunity_remaining_score": 0,
+            "opportunity_remaining_label": "⚪ No cycle target",
+            "cycle_low_price": None,
+            "cycle_target_price": None,
+            "move_completed_pct": None,
+        }
+
+    if low <= 0 or bounce <= 0:
+        return {
+            "opportunity_remaining_pct": None,
+            "opportunity_remaining_score": 0,
+            "opportunity_remaining_label": "⚪ No cycle target",
+            "cycle_low_price": low if low > 0 else None,
+            "cycle_target_price": None,
+            "move_completed_pct": None,
+        }
+
+    target = low * (1 + bounce / 100.0)
+    total_move = target - low
+    if total_move <= 0:
+        remaining = None
+        completed = None
+    else:
+        remaining = ((target - current) / total_move) * 100.0
+        completed = ((current - low) / total_move) * 100.0
+        remaining = max(0.0, min(100.0, remaining))
+        completed = max(0.0, min(100.0, completed))
+
+    if remaining is None:
+        score, label = 0, "⚪ No cycle target"
+    elif remaining >= 90:
+        score, label = 82, f"🟢 {remaining:.0f}% remaining · Very early"
+    elif remaining >= 70:
+        score, label = 100, f"🟢 {remaining:.0f}% remaining · Early"
+    elif remaining >= 40:
+        score, label = 90, f"🟡 {remaining:.0f}% remaining · Developing"
+    elif remaining >= 20:
+        score, label = 45, f"🟠 {remaining:.0f}% remaining · Late"
+    else:
+        score, label = 5, f"🔴 {remaining:.0f}% remaining · Extended"
+
+    return {
+        "opportunity_remaining_pct": round(remaining, 1) if remaining is not None else None,
+        "opportunity_remaining_score": int(round(score)),
+        "opportunity_remaining_label": label,
+        "cycle_low_price": round(low, 2),
+        "cycle_target_price": round(target, 2),
+        "move_completed_pct": round(completed, 1) if completed is not None else None,
+    }
 
 
 def rebound_stage_from_series(close, rsi_series, spring_score=0, days_since_under_30=None):
@@ -1292,10 +1357,31 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
         if rebounds.get("avg_max_bounce_pct") is not None:
             potential_sell_price = current_price * (1 + float(rebounds["avg_max_bounce_pct"]) / 100)
 
+        # Opportunity Remaining answers: if this is the current RSI panic cycle,
+        # how much of its usual historical rebound is still left from the RSI-event low?
+        recent_cycle_low_price = None
+        recent_cycle_low_date = None
+        if rebounds.get("events"):
+            recent_event = rebounds["events"][-1]
+            recent_cycle_low_price = recent_event.get("Low Close")
+            recent_cycle_low_date = recent_event.get("RSI Low Date")
+        opp_remaining = opportunity_remaining_from_cycle(
+            current_price,
+            recent_cycle_low_price,
+            rebounds.get("avg_max_bounce_pct"),
+        )
+
         return {
             "ticker": ticker,
             "price": round(current_price, 2),
             "potential_sell_price": round(float(potential_sell_price), 2) if potential_sell_price is not None else None,
+            "cycle_low_price": opp_remaining.get("cycle_low_price"),
+            "cycle_low_date": recent_cycle_low_date,
+            "cycle_target_price": opp_remaining.get("cycle_target_price"),
+            "opportunity_remaining_pct": opp_remaining.get("opportunity_remaining_pct"),
+            "opportunity_remaining_score": opp_remaining.get("opportunity_remaining_score"),
+            "opportunity_remaining_label": opp_remaining.get("opportunity_remaining_label"),
+            "move_completed_pct": opp_remaining.get("move_completed_pct"),
             "avg_vol_20d": int(avg_vol_20d) if avg_vol_20d else None,
             "current_volume": int(current_volume) if current_volume else None,
             "volume_ratio": round(float(volume_ratio), 2) if volume_ratio is not None else None,
@@ -1433,27 +1519,30 @@ def add_ranking_scores(frame: pd.DataFrame, target_pct: float, window_days: int)
         attention = _rank_num(row, "Attention Score")
         volume_trend = _rank_num(row, "Volume Trend Score")
         opp = _rank_num(row, "Opportunity Score")
+        opp_remaining = _rank_num(row, "Opportunity Remaining Score")
         bounce = _bounce_score(_rank_num(row, "Avg Max Bounce"), target_pct)
         speed = _speed_score(_rank_num(row, "Avg Days to Max"), window_days)
         win_rate = _rank_num(row, "Win Rate")
         risk_reward = _risk_reward_score(_rank_num(row, "Risk / Reward", 1.0))
 
         target_hunter = clamp(
-            0.26 * history +
+            0.22 * history +
             0.18 * bounce +
-            0.16 * speed +
-            0.16 * setup +
+            0.14 * speed +
+            0.15 * setup +
             0.12 * confidence +
             0.08 * stage +
+            0.07 * opp_remaining +
             0.04 * attention
         )
         ready_now = clamp(
-            0.30 * setup +
-            0.22 * spring +
-            0.16 * stage +
-            0.12 * attention +
-            0.10 * catalyst +
-            0.10 * volume_trend
+            0.25 * opp_remaining +
+            0.22 * setup +
+            0.20 * spring +
+            0.14 * stage +
+            0.09 * attention +
+            0.06 * catalyst +
+            0.04 * volume_trend
         )
         highest_confidence = clamp(
             0.34 * confidence +
@@ -1611,6 +1700,13 @@ def hot_card(rank, row):
 
     current_price = row.get("Price", "—")
     potential_price = row.get("Potential Swing Price", "—")
+    cycle_low_price = row.get("Cycle Low Price", "—")
+    cycle_low_date = row.get("Cycle Low Date", "—")
+    cycle_target_price = row.get("Cycle Target Price", "—")
+    opportunity_remaining = row.get("Opportunity Remaining", "—")
+    opportunity_remaining_pct = row.get("Opportunity Remaining %", "—")
+    opportunity_remaining_score = row.get("Opportunity Remaining Score", "—")
+    move_completed_pct = row.get("Move Completed %", "—")
     avg_max = row.get("Avg Max Bounce", "—")
     avg_days = row.get("Avg Days to Max", "—")
     rsi = row.get("RSI", "—")
@@ -1671,8 +1767,19 @@ def hot_card(rank, row):
     price_tip = f"""
         <strong>Price / target</strong><br>
         Current close: {_safe_html(current_price)}<br>
-        Potential swing price: {_safe_html(potential_price)}<br><br>
-        The target uses the stock's average historical max bounce after RSI panic inside your selected swing window.
+        Potential swing price from current: {_safe_html(potential_price)}<br>
+        Cycle target from RSI panic low: {_safe_html(cycle_target_price)}<br><br>
+        The potential swing price uses the stock's average historical max bounce from the current price. The cycle target anchors the move to the most recent RSI panic low.
+    """
+    remaining_tip = f"""
+        <strong>Opportunity remaining</strong><br>
+        {_safe_html(clean_label(opportunity_remaining))}<br>
+        Score: {_safe_html(opportunity_remaining_score)}/100<br><br>
+        RSI panic low: {_safe_html(cycle_low_price)} on {_safe_html(cycle_low_date)}<br>
+        Current price: {_safe_html(current_price)}<br>
+        Cycle target: {_safe_html(cycle_target_price)}<br>
+        Move completed: {_safe_html(move_completed_pct)}%<br><br>
+        This estimates how much of the stock's usual post-RSI-panic move may still be left. It helps avoid names that already made most of their historical rebound.
     """
     if oversold_since not in [None, "", "—"] and not pd.isna(oversold_since):
         oversold_line = f"RSI became oversold this streak: {_safe_html(oversold_since)}"
@@ -1753,6 +1860,7 @@ def hot_card(rank, row):
             {hover_item('RSI', f'{rsi} · {clean_label(opportunity)}', rsi_tip, dot=True)}
             {hover_item('Stage', clean_label(rebound_stage), stage_tip, dot=True)}
             {hover_item('Potential', f'+{avg_max}% in {avg_days}d avg', bounce_tip)}
+            {hover_item('Remaining', clean_label(opportunity_remaining), remaining_tip, dot=True)}
             {hover_item('History', history, history_tip)}
             {hover_item('Attention', clean_label(attention), attention_tip, dot=True)}
             {hover_item('Volume trend', clean_label(volume_trend), volume_trend_tip, dot=True)}
@@ -1946,6 +2054,13 @@ for r in results:
         "Rebound Stage Reason": r.get("rebound_stage_reason"),
         "Price": r["price"],
         "Potential Swing Price": r.get("potential_sell_price"),
+        "Cycle Low Price": r.get("cycle_low_price"),
+        "Cycle Low Date": r.get("cycle_low_date"),
+        "Cycle Target Price": r.get("cycle_target_price"),
+        "Opportunity Remaining": r.get("opportunity_remaining_label"),
+        "Opportunity Remaining %": r.get("opportunity_remaining_pct"),
+        "Opportunity Remaining Score": r.get("opportunity_remaining_score"),
+        "Move Completed %": r.get("move_completed_pct"),
         "Avg Max Bounce": r.get("avg_max_bounce_pct"),
         "Avg Days to Max": r.get("avg_days_to_max_bounce"),
         "Successful Swings": r.get("profitable_event_count"),
@@ -2089,7 +2204,7 @@ compact_cols = [
     "Ticker", "Active Rank Score", "Setup Quality", "Swing Score", "Rebound Stage", "Spring TF", "Spring", "Spring Score", "Attention", "Volume Trend", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
 ]
 research_cols = compact_cols + [
-    "🎯 Target Hunter Score", "⚡ Ready Now Score", "🧠 Confidence Rank Score", "🚀 Upside Rank Score", "Target Bounce Score", "Speed Score", "Rebound Stage Score", "Rebound Stage Reason", "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Trend Score", "Volume Trend Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "🎯 Target Hunter Score", "⚡ Ready Now Score", "🧠 Confidence Rank Score", "🚀 Upside Rank Score", "Target Bounce Score", "Speed Score", "Rebound Stage Score", "Rebound Stage Reason", "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Trend Score", "Volume Trend Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Opportunity Remaining Score", "Opportunity Remaining %", "Move Completed %", "Cycle Low Price", "Cycle Target Price", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -2152,9 +2267,9 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V6.3 uses multiple ranking lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (20% current RSI opportunity, 25% Rebound Stage, 20% catalyst/news, 20% TTM Spring, 10% attention/RVOL, 5% volume trend).
+    Current V6.4 uses multiple ranking lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (20% current RSI opportunity, 25% Rebound Stage, 20% catalyst/news, 20% TTM Spring, 10% attention/RVOL, 5% volume trend).
 
-    **Ranking Mode** defines what #1 means. 🎯 Target Hunter is the default for your 8% swing goal; ⚡ Ready Now is for what to open in ThinkorSwim first; 🧠 Highest Confidence is the safest historical pattern; 🚀 Maximum Upside is the biggest reward lens.
+    **Ranking Mode** defines what #1 means. 🎯 Target Hunter is the default for your 8% swing goal; ⚡ Ready Now is for what to open in ThinkorSwim first; 🧠 Highest Confidence is the safest historical pattern; 🚀 Maximum Upside is the biggest reward lens. V6.4 also adds **Opportunity Remaining**, which estimates how much of the usual RSI-panic rebound may still be left from the most recent panic-cycle low.
 
 **Setup ≥75** is the “open this in ThinkorSwim now” bucket. Stocks in the high 60s/low 70s are often the almost-there names — they may need one more thing, such as RSI slipping lower, a stronger spring turn, fresh news, or higher relative volume.
 
