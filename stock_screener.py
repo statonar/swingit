@@ -1,5 +1,5 @@
 """
-SwingIt V6.2 — Rebound Stage + Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V6.3 — Rebound Stage + Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V6.2",
+    page_title="SwingIt V6.3",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -198,7 +198,7 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V6.2")
+    st.markdown("## 🔥 SwingIt V6.3")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -1347,6 +1347,149 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
         return None
 
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Ranking engine — lets the same scan answer different trader questions
+# ──────────────────────────────────────────────────────────────────────────────
+RANKING_MODES = [
+    "🎯 8% Target Hunter",
+    "⚡ Ready Now",
+    "🧠 Highest Confidence",
+    "🚀 Maximum Upside",
+]
+
+RANKING_HELP = {
+    "🎯 8% Target Hunter": "Ranks for the best blend of historical rebound edge, current turn-zone timing, confidence, and chance of reaching your selected profit target.",
+    "⚡ Ready Now": "Ranks for names closest to a near-term trigger: strong setup quality, spring timing, RVOL/attention, fresh catalyst, and volume trend.",
+    "🧠 Highest Confidence": "Ranks for the most repeatable historical pattern: more events, stronger confidence, better swing history, and cleaner risk/reward.",
+    "🚀 Maximum Upside": "Ranks for the largest potential reward. This can surface more volatile names, so use confidence and drawdown carefully.",
+}
+
+
+def _rank_num(row, col, default=0.0):
+    try:
+        val = row.get(col, default)
+        if val is None or pd.isna(val):
+            return float(default)
+        return float(val)
+    except Exception:
+        return float(default)
+
+
+def _bounce_score(avg_max_bounce, target_pct):
+    """Scores how much historical upside exists relative to the user's goal."""
+    try:
+        b = float(avg_max_bounce)
+        t = max(float(target_pct), 1.0)
+    except Exception:
+        return 0.0
+    # Full credit around 2x the target; partial credit below target.
+    return clamp((b / (t * 2.0)) * 100.0)
+
+
+def _speed_score(avg_days, window_days):
+    """Favors bounces that happen within the user's 1-4 week swing window."""
+    try:
+        d = float(avg_days)
+        w = max(float(window_days), 1.0)
+    except Exception:
+        return 0.0
+    if d <= 0:
+        return 0.0
+    if d <= w * 0.35:
+        return 100.0
+    if d <= w * 0.65:
+        return 85.0
+    if d <= w:
+        return 65.0
+    return max(0.0, 65.0 - ((d - w) / w) * 65.0)
+
+
+def _risk_reward_score(rr):
+    try:
+        rr = float(rr)
+    except Exception:
+        return 35.0
+    if rr <= 0:
+        return 0.0
+    return clamp((rr / 3.0) * 100.0)
+
+
+def add_ranking_scores(frame: pd.DataFrame, target_pct: float, window_days: int) -> pd.DataFrame:
+    """Adds four ranking lenses without changing the underlying scan data."""
+    if frame.empty:
+        return frame
+    out = frame.copy()
+    scores = []
+    for _, row in out.iterrows():
+        swing = _rank_num(row, "Swing Score")
+        setup = _rank_num(row, "Setup Quality")
+        spring = _rank_num(row, "Spring Score")
+        confidence = _rank_num(row, "Confidence Score")
+        history = _rank_num(row, "History Score")
+        stage = _rank_num(row, "Rebound Stage Score")
+        catalyst = _rank_num(row, "Catalyst Score")
+        attention = _rank_num(row, "Attention Score")
+        volume_trend = _rank_num(row, "Volume Trend Score")
+        opp = _rank_num(row, "Opportunity Score")
+        bounce = _bounce_score(_rank_num(row, "Avg Max Bounce"), target_pct)
+        speed = _speed_score(_rank_num(row, "Avg Days to Max"), window_days)
+        win_rate = _rank_num(row, "Win Rate")
+        risk_reward = _risk_reward_score(_rank_num(row, "Risk / Reward", 1.0))
+
+        target_hunter = clamp(
+            0.26 * history +
+            0.18 * bounce +
+            0.16 * speed +
+            0.16 * setup +
+            0.12 * confidence +
+            0.08 * stage +
+            0.04 * attention
+        )
+        ready_now = clamp(
+            0.30 * setup +
+            0.22 * spring +
+            0.16 * stage +
+            0.12 * attention +
+            0.10 * catalyst +
+            0.10 * volume_trend
+        )
+        highest_confidence = clamp(
+            0.34 * confidence +
+            0.26 * history +
+            0.16 * win_rate +
+            0.12 * risk_reward +
+            0.12 * swing
+        )
+        maximum_upside = clamp(
+            0.36 * bounce +
+            0.20 * swing +
+            0.16 * opp +
+            0.12 * catalyst +
+            0.10 * attention +
+            0.06 * spring
+        )
+        scores.append((target_hunter, ready_now, highest_confidence, maximum_upside, bounce, speed))
+
+    out["🎯 Target Hunter Score"] = [int(round(x[0])) for x in scores]
+    out["⚡ Ready Now Score"] = [int(round(x[1])) for x in scores]
+    out["🧠 Confidence Rank Score"] = [int(round(x[2])) for x in scores]
+    out["🚀 Upside Rank Score"] = [int(round(x[3])) for x in scores]
+    out["Target Bounce Score"] = [int(round(x[4])) for x in scores]
+    out["Speed Score"] = [int(round(x[5])) for x in scores]
+    return out
+
+
+def ranking_column_for(mode: str) -> str:
+    return {
+        "🎯 8% Target Hunter": "🎯 Target Hunter Score",
+        "⚡ Ready Now": "⚡ Ready Now Score",
+        "🧠 Highest Confidence": "🧠 Confidence Rank Score",
+        "🚀 Maximum Upside": "🚀 Upside Rank Score",
+    }.get(mode, "🎯 Target Hunter Score")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Visual helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1840,12 +1983,32 @@ for r in results:
     })
 
 df = pd.DataFrame(rows)
-df_sorted = df.sort_values(["Setup Quality", "Swing Score", "RSI"], ascending=[False, False, True], na_position="last").reset_index(drop=True)
+df = add_ranking_scores(df, active_profit_target, active_bounce_window)
+
+st.markdown("### Ranking mode")
+rank_col_ui, rank_help_col = st.columns([1.4, 2.6])
+with rank_col_ui:
+    ranking_mode = st.selectbox(
+        "What should #1 mean?",
+        RANKING_MODES,
+        index=0,
+        key="ranking_mode_selector",
+        help="Change the lens without rerunning the scan.",
+    )
+with rank_help_col:
+    st.markdown(
+        f"<div class='small-muted' style='padding-top:1.9rem;'>{_safe_html(RANKING_HELP.get(ranking_mode, ''))}</div>",
+        unsafe_allow_html=True,
+    )
+
+rank_col = ranking_column_for(ranking_mode)
+df_sorted = df.sort_values([rank_col, "Setup Quality", "Swing Score", "RSI"], ascending=[False, False, False, True], na_position="last").reset_index(drop=True)
+df_sorted["Active Rank Score"] = pd.to_numeric(df_sorted[rank_col], errors="coerce").fillna(0).round(0).astype(int)
 
 # Top summary metrics — clickable filter cards
-rsi_under_40_count = int((pd.to_numeric(df_sorted["RSI"], errors="coerce") < 40).sum())
-high_conf_count = int(df_sorted["Confidence"].astype(str).str.contains("High", na=False).sum())
-setup_75_count = int((pd.to_numeric(df_sorted["Setup Quality"], errors="coerce") >= 75).sum())
+rsi_under_40_count = int((pd.to_numeric(df["RSI"], errors="coerce") < 40).sum())
+high_conf_count = int(df["Confidence"].astype(str).str.contains("High", na=False).sum())
+setup_75_count = int((pd.to_numeric(df["Setup Quality"], errors="coerce") >= 75).sum())
 
 st.markdown("### Quick filters")
 fc1, fc2, fc3, fc4, fc5 = st.columns(5)
@@ -1892,7 +2055,7 @@ if active_filter != "All":
             st.rerun()
 
 st.markdown("## 🔥 Best Swing Opportunities")
-st.caption("Top 10 from the current filter/sort view. Use the sidebar arrow to reopen filters when needed.")
+st.caption(f"Top 10 ranked by **{ranking_mode}**. Change the ranking mode above to ask a different question.")
 top = filtered_df.head(10)
 if not top.empty:
     for start in range(0, len(top), 5):
@@ -1907,7 +2070,7 @@ st.markdown("## Watchlist Leaderboard")
 
 sort_a, sort_b, sort_c = st.columns([1.4, 1, 1])
 with sort_a:
-    default_sort = "Setup Quality" if "Setup Quality" in df_sorted.columns else df_sorted.columns[0]
+    default_sort = "Active Rank Score" if "Active Rank Score" in df_sorted.columns else (rank_col if rank_col in df_sorted.columns else df_sorted.columns[0])
     sort_by = st.selectbox(
         "Sort by",
         df_sorted.columns.tolist(),
@@ -1923,10 +2086,10 @@ ascending = sort_direction == "Ascending"
 display = filtered_df.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
-    "Ticker", "Setup Quality", "Swing Score", "Rebound Stage", "Spring TF", "Spring", "Spring Score", "Attention", "Volume Trend", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
+    "Ticker", "Active Rank Score", "Setup Quality", "Swing Score", "Rebound Stage", "Spring TF", "Spring", "Spring Score", "Attention", "Volume Trend", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
 ]
 research_cols = compact_cols + [
-    "Rebound Stage Score", "Rebound Stage Reason", "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Trend Score", "Volume Trend Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "🎯 Target Hunter Score", "⚡ Ready Now Score", "🧠 Confidence Rank Score", "🚀 Upside Rank Score", "Target Bounce Score", "Speed Score", "Rebound Stage Score", "Rebound Stage Reason", "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Trend Score", "Volume Trend Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -1989,9 +2152,11 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V6.2 uses two scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (20% current RSI opportunity, 25% Rebound Stage, 20% catalyst/news, 20% TTM Spring, 10% attention/RVOL, 5% volume trend).
+    Current V6.3 uses multiple ranking lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (20% current RSI opportunity, 25% Rebound Stage, 20% catalyst/news, 20% TTM Spring, 10% attention/RVOL, 5% volume trend).
 
-    **Setup ≥75** is the “open this in ThinkorSwim now” bucket. Stocks in the high 60s/low 70s are often the almost-there names — they may need one more thing, such as RSI slipping lower, a stronger spring turn, fresh news, or higher relative volume.
+    **Ranking Mode** defines what #1 means. 🎯 Target Hunter is the default for your 8% swing goal; ⚡ Ready Now is for what to open in ThinkorSwim first; 🧠 Highest Confidence is the safest historical pattern; 🚀 Maximum Upside is the biggest reward lens.
+
+**Setup ≥75** is the “open this in ThinkorSwim now” bucket. Stocks in the high 60s/low 70s are often the almost-there names — they may need one more thing, such as RSI slipping lower, a stronger spring turn, fresh news, or higher relative volume.
 
     This is meant to produce a **watchlist**, not a buy signal. Entries should still come from price action, VWAP, volume, support/reclaim behavior, and your 5m/15m process.
     """)
