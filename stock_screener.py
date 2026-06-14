@@ -447,22 +447,39 @@ def _normalize_ticker(ticker: str) -> str:
     return str(ticker).strip().upper().replace(".", "-")
 
 
+def _favorites_state_key() -> str:
+    return f"favorites_{PROFILE_SLUG}"
+
+
 def load_favorites() -> list[str]:
-    """Load persistent favorites from a small JSON file in the app directory."""
+    """Load profile-specific favorites.
+
+    Important: Favorites must not rely only on a cached universe payload. Streamlit reruns
+    the app constantly, so we keep a session-state copy and mirror it to disk when possible.
+    """
+    key = _favorites_state_key()
+    if key in st.session_state:
+        return dedupe([_normalize_ticker(t) for t in st.session_state.get(key, []) if str(t).strip()])
+
+    favs = []
     try:
         if os.path.exists(FAVORITES_FILE):
             with open(FAVORITES_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
-                return dedupe([_normalize_ticker(t) for t in data if str(t).strip()])
+                favs = dedupe([_normalize_ticker(t) for t in data if str(t).strip()])
     except Exception:
-        pass
-    return []
+        favs = []
+
+    st.session_state[key] = favs
+    return favs
 
 
 def save_favorites(tickers: list[str]) -> None:
+    clean = dedupe([_normalize_ticker(t) for t in tickers if str(t).strip()])
+    st.session_state[_favorites_state_key()] = clean
     try:
-        clean = dedupe([_normalize_ticker(t) for t in tickers if str(t).strip()])
+        os.makedirs(PROFILE_DIR, exist_ok=True)
         with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
             json.dump(clean, f, indent=2)
     except Exception:
@@ -1120,8 +1137,12 @@ def add_sources(source_map, tickers, source_name):
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_universe_payload(selected_universe: str, custom_text: str = ""):
-    """Returns (tickers, source_map) for the selected universe."""
+def get_universe_payload_static(selected_universe: str, custom_text: str = ""):
+    """Cached universe builder for stable/public universes.
+
+    Favorites are intentionally NOT handled here because cached functions do not
+    know when a user adds/removes a favorite. Favorites are loaded live below.
+    """
     source_map = {}
 
     def add_etf(etf):
@@ -1129,9 +1150,7 @@ def get_universe_payload(selected_universe: str, custom_text: str = ""):
         add_sources(source_map, names, etf)
         return names
 
-    if selected_universe == "⭐ Favorites":
-        tickers = load_favorites(); add_sources(source_map, tickers, "Favorites")
-    elif selected_universe == "📂 CSV upload":
+    if selected_universe == "📂 CSV upload":
         raw = custom_text.replace("\n", ",").replace(";", ",")
         tickers = dedupe([t for t in raw.split(",") if t.strip()])
         add_sources(source_map, tickers, "CSV Upload")
@@ -1143,10 +1162,10 @@ def get_universe_payload(selected_universe: str, custom_text: str = ""):
         tickers = DOW30; add_sources(source_map, tickers, "Dow 30")
     elif selected_universe == "Russell 1000":
         tickers = get_russell1000()
-        add_sources(source_map, tickers, "Russell 1000 / IWB")
+        add_sources(source_map, tickers, "Russell 1000")
     elif selected_universe == "Russell 3000":
         tickers = get_russell3000()
-        add_sources(source_map, tickers, "Russell 3000 / IWV")
+        add_sources(source_map, tickers, "Russell 3000")
     elif selected_universe == "FXAIX / VOO Holdings":
         tickers = add_etf("VOO")
         add_sources(source_map, tickers, "FXAIX")
@@ -1173,9 +1192,22 @@ def get_universe_payload(selected_universe: str, custom_text: str = ""):
         tickers = dedupe([t for t in raw.split(",") if t.strip()])
         add_sources(source_map, tickers, "Custom")
 
-    # Convert sets to sorted lists for caching/session-state friendliness.
     source_map = {k: sorted(v) for k, v in source_map.items()}
     return dedupe(tickers), source_map
+
+
+def get_universe_payload(selected_universe: str, custom_text: str = ""):
+    """Returns (tickers, source_map) for the selected universe.
+
+    Favorites are loaded live for the active profile so newly added favorites are
+    immediately scan-able and do not get trapped behind Streamlit's cache.
+    """
+    if selected_universe == "⭐ Favorites":
+        tickers = load_favorites()
+        source_map = {}
+        add_sources(source_map, tickers, "Favorites")
+        return dedupe(tickers), {k: sorted(v) for k, v in source_map.items()}
+    return get_universe_payload_static(selected_universe, custom_text)
 
 
 def get_universe_tickers(selected_universe: str, custom_text: str = ""):
