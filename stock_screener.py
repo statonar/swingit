@@ -1,5 +1,5 @@
 """
-SwingIt V6.4 — Rebound Stage + Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V6.4.2 — Rebound Stage + Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -14,6 +14,7 @@ from io import StringIO
 import datetime
 import html
 import math
+import re
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -28,7 +29,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V6.4",
+    page_title="SwingIt V6.4.2",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -198,7 +199,7 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V6.4")
+    st.markdown("## 🔥 SwingIt V6.4.2")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
