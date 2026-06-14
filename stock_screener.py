@@ -1,5 +1,5 @@
 """
-SwingIt V6.5 — Compact Sidebar + Full Universe Scan
+SwingIt V7 — Overreaction Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -29,7 +29,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V6.5",
+    page_title="SwingIt V7",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -871,6 +871,24 @@ CATALYST_MEDIUM_WORDS = [
 ]
 
 
+OVERREACTION_POSITIVE_WORDS = [
+    "beat", "beats", "better than expected", "tops estimates", "above estimates", "raised guidance", "raises guidance",
+    "maintains guidance", "reaffirms", "record revenue", "strong demand", "growth", "backlog", "contract",
+    "deal", "partnership", "approval", "approved", "upgrade", "upgraded", "outperform", "ai", "cloud"
+]
+OVERREACTION_MISMATCH_WORDS = [
+    "falls despite", "drops despite", "slumps despite", "shares fall despite", "stock falls despite",
+    "selloff despite", "down despite", "profit taking", "margin concerns", "spending concerns",
+    "valuation concerns", "investors worry", "overreaction", "shares slide despite"
+]
+OVERREACTION_RED_FLAG_WORDS = [
+    "cuts guidance", "cut guidance", "lowered guidance", "lowers guidance", "misses", "missed estimates",
+    "sec investigation", "investigation", "probe", "accounting", "fraud", "bankruptcy", "going concern",
+    "ceo resigns", "resigns", "recall", "lawsuit", "downgrade", "downgraded", "dividend cut",
+    "warns", "warning", "halts", "delayed", "delay", "weak outlook", "loss widens"
+]
+
+
 def _safe_news_title(item):
     """Yahoo/yfinance news shape has changed a few times, so keep this defensive."""
     if not isinstance(item, dict):
@@ -926,6 +944,7 @@ def catalyst_score_from_news(headlines, dates, volume_ratio=None):
             "news_headline": "No recent Yahoo Finance headlines found.",
             "news_age_days": None,
             "news_tone": "None",
+            "news_text": "",
         }
 
     today = datetime.date.today()
@@ -1009,6 +1028,7 @@ def catalyst_score_from_news(headlines, dates, volume_ratio=None):
         "news_headline": headlines[0][:160],
         "news_age_days": age_days,
         "news_tone": tone,
+        "news_text": " ".join(headlines)[:900],
     }
 
 
@@ -1036,8 +1056,157 @@ def get_news_snapshot(ticker: str, volume_ratio: float | None = None):
             "news_headline": "News lookup failed or was rate-limited.",
             "news_age_days": None,
             "news_tone": "Unavailable",
+            "news_text": "",
         }
 
+
+
+def score_price_drop(drop_pct: float, days: int) -> float:
+    """Scores the size/speed of a recent selloff. drop_pct is negative for a drop."""
+    try:
+        d = abs(float(drop_pct))
+    except Exception:
+        return 0.0
+    if days <= 1:
+        if d >= 15: return 100.0
+        if d >= 10: return 75.0
+        if d >= 6: return 45.0
+        return clamp((d / 6.0) * 45.0)
+    if days <= 3:
+        if d >= 25: return 100.0
+        if d >= 15: return 78.0
+        if d >= 8: return 45.0
+        return clamp((d / 8.0) * 45.0)
+    if d >= 30: return 100.0
+    if d >= 18: return 78.0
+    if d >= 10: return 45.0
+    return clamp((d / 10.0) * 45.0)
+
+
+def panic_shock_from_df(close: pd.Series, volume: pd.Series, lookback_days: int = 15) -> dict:
+    """Finds the most meaningful recent fast selloff over 1/3/5 trading days."""
+    empty = {
+        "panic_shock_score": 0,
+        "panic_drop_pct": None,
+        "panic_drop_days": None,
+        "panic_drop_date": None,
+        "panic_volume_ratio": None,
+        "panic_label": "⚪ No recent panic",
+        "panic_reason": "No meaningful fast selloff found in the recent lookback."
+    }
+    if close is None or len(close.dropna()) < 30:
+        return empty
+    c = close.dropna().astype(float)
+    v = volume.reindex(c.index).astype(float) if volume is not None else pd.Series(index=c.index, dtype=float)
+    recent_idx = c.tail(lookback_days).index
+    best = None
+    for days in [1, 3, 5]:
+        ret = (c / c.shift(days) - 1.0) * 100.0
+        for idx, drop in ret.loc[ret.index.intersection(recent_idx)].dropna().items():
+            if drop >= 0:
+                continue
+            base_score = score_price_drop(drop, days)
+            # fresher panics matter more for a 1–4 week swing watchlist
+            days_since = max(0, len(c) - 1 - c.index.get_loc(idx))
+            recency_factor = max(0.25, 1.0 - (days_since / max(lookback_days, 1)) * 0.75)
+            price_score = base_score * recency_factor
+            avg_vol = v.shift(1).rolling(20).mean().loc[idx] if idx in v.index else None
+            cur_vol = v.loc[idx] if idx in v.index else None
+            vr = (float(cur_vol) / float(avg_vol)) if avg_vol and avg_vol > 0 and cur_vol else None
+            vol_score = _volume_score_from_ratio(vr) if vr else 0
+            shock_score = clamp(0.75 * price_score + 0.25 * vol_score)
+            if best is None or shock_score > best["panic_shock_score"]:
+                best = {
+                    "panic_shock_score": int(round(shock_score)),
+                    "panic_drop_pct": round(float(drop), 2),
+                    "panic_drop_days": days,
+                    "panic_drop_date": idx.date() if hasattr(idx, "date") else idx,
+                    "panic_volume_ratio": round(float(vr), 2) if vr else None,
+                    "days_since_panic": int(days_since),
+                }
+    if not best:
+        return empty
+    drop = best["panic_drop_pct"]
+    days = best["panic_drop_days"]
+    vr = best.get("panic_volume_ratio")
+    score = best["panic_shock_score"]
+    if score >= 75:
+        label = f"🔴 Panic shock ({drop:.1f}%/{days}d)"
+    elif score >= 45:
+        label = f"🟡 Selloff shock ({drop:.1f}%/{days}d)"
+    else:
+        label = f"⚪ Light selloff ({drop:.1f}%/{days}d)"
+    best["panic_label"] = label
+    best["panic_reason"] = f"Worst recent fast selloff: {drop:.1f}% over {days} trading day(s), {best.get('days_since_panic')} trading day(s) ago" + (f", with {vr:.1f}x volume on the selloff day." if vr else ".")
+    return best
+
+
+def narrative_mismatch_from_news(news: dict, shock_score: float) -> dict:
+    """Lightweight rules engine for: did the news look better than the selloff implied?"""
+    text = str(news.get("news_text") or news.get("news_headline") or "").lower()
+    if not text.strip():
+        return {
+            "narrative_score": 20,
+            "narrative_label": "⚪ No narrative read",
+            "narrative_reason": "No usable recent headline text was available, so narrative mismatch is low-confidence.",
+            "red_flag_label": "⚪ No red flag scan",
+            "red_flag_score_cap": 100,
+        }
+    pos = _keyword_count(text, OVERREACTION_POSITIVE_WORDS)
+    mismatch = _keyword_count(text, OVERREACTION_MISMATCH_WORDS)
+    red = _keyword_count(text, OVERREACTION_RED_FLAG_WORDS)
+    tone = str(news.get("news_tone") or "").lower()
+    age = news.get("news_age_days")
+    fresh_bonus = 10 if age is None or age <= 7 else (4 if age <= 21 else 0)
+
+    score = 20 + min(35, pos * 9) + min(25, mismatch * 13) + fresh_bonus
+    if "positive" in tone:
+        score += 10
+    elif "negative" in tone:
+        score -= 8
+    if shock_score and shock_score >= 60 and (pos or mismatch):
+        score += 10
+    if red:
+        score -= min(55, red * 18)
+    score = int(round(clamp(score)))
+
+    if red >= 2:
+        cap = 35
+        red_label = "🔴 Major red flags"
+    elif red == 1:
+        cap = 60
+        red_label = "🟠 Possible red flag"
+    else:
+        cap = 100
+        red_label = "🟢 No major red flags"
+
+    if score >= 75:
+        label = "🟢 Strong mismatch"
+    elif score >= 50:
+        label = "🟡 Possible mismatch"
+    elif score >= 30:
+        label = "⚪ Unclear mismatch"
+    else:
+        label = "🔴 News may justify drop"
+
+    reason = f"Positive clues: {pos}; mismatch clues: {mismatch}; red flags: {red}; news tone: {news.get('news_tone', '—')}; news age: {age if age is not None else 'unknown'} days."
+    return {
+        "narrative_score": score,
+        "narrative_label": label,
+        "narrative_reason": reason,
+        "red_flag_label": red_label,
+        "red_flag_score_cap": cap,
+    }
+
+
+def overreaction_score_from_parts(shock_score, narrative_score, history_score, opportunity_remaining_score, red_flag_cap=100):
+    score = clamp(
+        0.30 * (shock_score or 0) +
+        0.35 * (narrative_score or 0) +
+        0.20 * (history_score or 0) +
+        0.15 * (opportunity_remaining_score or 0)
+    )
+    return int(round(min(score, red_flag_cap or 100)))
 
 def confidence_from_history(event_count, recovery_rate):
     """Separate confidence from opportunity: how much evidence supports the pattern."""
@@ -1300,6 +1469,7 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "news_headline": "News snapshot is turned off.",
             "news_age_days": None,
             "news_tone": "Off",
+            "news_text": "",
         }
         catalyst_score = news.get("catalyst_score", 0)
         attention_score = _volume_score_from_ratio(volume_ratio)
@@ -1376,6 +1546,25 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             rebounds.get("avg_max_bounce_pct"),
         )
 
+
+        panic = panic_shock_from_df(close, volume, lookback_days=15)
+        narrative = narrative_mismatch_from_news(news, panic.get("panic_shock_score", 0))
+        overreaction_score = overreaction_score_from_parts(
+            panic.get("panic_shock_score", 0),
+            narrative.get("narrative_score", 0),
+            history_score,
+            opp_remaining.get("opportunity_remaining_score", 0),
+            narrative.get("red_flag_score_cap", 100),
+        )
+        if overreaction_score >= 75:
+            overreaction_label = "🟢 Strong overreaction"
+        elif overreaction_score >= 55:
+            overreaction_label = "🟡 Possible overreaction"
+        elif overreaction_score >= 35:
+            overreaction_label = "⚪ Unclear overreaction"
+        else:
+            overreaction_label = "🔴 Weak overreaction"
+
         return {
             "ticker": ticker,
             "price": round(current_price, 2),
@@ -1387,6 +1576,19 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "opportunity_remaining_score": opp_remaining.get("opportunity_remaining_score"),
             "opportunity_remaining_label": opp_remaining.get("opportunity_remaining_label"),
             "move_completed_pct": opp_remaining.get("move_completed_pct"),
+            "panic_shock_score": panic.get("panic_shock_score"),
+            "panic_label": panic.get("panic_label"),
+            "panic_reason": panic.get("panic_reason"),
+            "panic_drop_pct": panic.get("panic_drop_pct"),
+            "panic_drop_days": panic.get("panic_drop_days"),
+            "panic_drop_date": panic.get("panic_drop_date"),
+            "panic_volume_ratio": panic.get("panic_volume_ratio"),
+            "narrative_score": narrative.get("narrative_score"),
+            "narrative_label": narrative.get("narrative_label"),
+            "narrative_reason": narrative.get("narrative_reason"),
+            "red_flag_label": narrative.get("red_flag_label"),
+            "overreaction_score": overreaction_score,
+            "overreaction_label": overreaction_label,
             "avg_vol_20d": int(avg_vol_20d) if avg_vol_20d else None,
             "current_volume": int(current_volume) if current_volume else None,
             "volume_ratio": round(float(volume_ratio), 2) if volume_ratio is not None else None,
@@ -1448,6 +1650,7 @@ RANKING_MODES = [
     "⚡ Ready Now",
     "🧠 Highest Confidence",
     "🚀 Maximum Upside",
+    "😱 Overreaction",
 ]
 
 RANKING_HELP = {
@@ -1525,6 +1728,9 @@ def add_ranking_scores(frame: pd.DataFrame, target_pct: float, window_days: int)
         volume_trend = _rank_num(row, "Volume Trend Score")
         opp = _rank_num(row, "Opportunity Score")
         opp_remaining = _rank_num(row, "Opportunity Remaining Score")
+        overreaction = _rank_num(row, "Overreaction Score")
+        shock = _rank_num(row, "Panic Shock Score")
+        narrative = _rank_num(row, "Narrative Score")
         bounce = _bounce_score(_rank_num(row, "Avg Max Bounce"), target_pct)
         speed = _speed_score(_rank_num(row, "Avg Days to Max"), window_days)
         win_rate = _rank_num(row, "Win Rate")
@@ -1564,14 +1770,23 @@ def add_ranking_scores(frame: pd.DataFrame, target_pct: float, window_days: int)
             0.10 * attention +
             0.06 * spring
         )
-        scores.append((target_hunter, ready_now, highest_confidence, maximum_upside, bounce, speed))
+        overreaction_rank = clamp(
+            0.46 * overreaction +
+            0.18 * shock +
+            0.16 * narrative +
+            0.10 * opp_remaining +
+            0.06 * spring +
+            0.04 * attention
+        )
+        scores.append((target_hunter, ready_now, highest_confidence, maximum_upside, overreaction_rank, bounce, speed))
 
     out["🎯 Target Hunter Score"] = [int(round(x[0])) for x in scores]
     out["⚡ Ready Now Score"] = [int(round(x[1])) for x in scores]
     out["🧠 Confidence Rank Score"] = [int(round(x[2])) for x in scores]
     out["🚀 Upside Rank Score"] = [int(round(x[3])) for x in scores]
-    out["Target Bounce Score"] = [int(round(x[4])) for x in scores]
-    out["Speed Score"] = [int(round(x[5])) for x in scores]
+    out["😱 Overreaction Rank Score"] = [int(round(x[4])) for x in scores]
+    out["Target Bounce Score"] = [int(round(x[5])) for x in scores]
+    out["Speed Score"] = [int(round(x[6])) for x in scores]
     return out
 
 
@@ -1581,6 +1796,7 @@ def ranking_column_for(mode: str) -> str:
         "⚡ Ready Now": "⚡ Ready Now Score",
         "🧠 Highest Confidence": "🧠 Confidence Rank Score",
         "🚀 Maximum Upside": "🚀 Upside Rank Score",
+        "😱 Overreaction": "😱 Overreaction Rank Score",
     }.get(mode, "🎯 Target Hunter Score")
 
 
@@ -1764,6 +1980,15 @@ def hot_card(rank, row):
     cycle_low_date = row.get("Cycle Low Date", "—")
     cycle_target_price = row.get("Cycle Target Price", "—")
     opportunity_remaining = row.get("Opportunity Remaining", "—")
+    overreaction = row.get("Overreaction", "—")
+    overreaction_score = row.get("Overreaction Score", "—")
+    panic_shock = row.get("Panic Shock", "—")
+    panic_shock_score = row.get("Panic Shock Score", "—")
+    panic_reason = _safe_html(row.get("Panic Reason", "No panic-shock details available."))
+    narrative = row.get("Narrative", "—")
+    narrative_score = row.get("Narrative Score", "—")
+    narrative_reason = _safe_html(row.get("Narrative Reason", "No narrative details available."))
+    red_flags = row.get("Red Flags", "—")
     opportunity_remaining_pct = row.get("Opportunity Remaining %", "—")
     opportunity_remaining_score = row.get("Opportunity Remaining Score", "—")
     move_completed_pct = row.get("Move Completed %", "—")
@@ -1893,6 +2118,17 @@ def hot_card(rank, row):
         {headline}<br><br>
         News label: {news}
     """
+    overreaction_tip = f"""
+        <strong>Overreaction</strong><br>
+        Score: {_safe_html(overreaction_score)}/100<br><br>
+        <strong>Panic shock</strong><br>
+        {_safe_html(clean_label(panic_shock))}: {_safe_html(panic_shock_score)}/100<br>
+        {panic_reason}<br><br>
+        <strong>Narrative mismatch</strong><br>
+        {_safe_html(clean_label(narrative))}: {_safe_html(narrative_score)}/100<br>
+        {narrative_reason}<br><br>
+        Red flag scan: {_safe_html(clean_label(red_flags))}
+    """
     confidence_tip = f"""
         <strong>Confidence</strong><br>
         {_safe_html(clean_label(confidence))}<br><br>
@@ -1921,6 +2157,7 @@ def hot_card(rank, row):
             {hover_item('Stage', clean_label(rebound_stage), stage_tip, dot=True)}
             {hover_item('Potential', f'+{avg_max}% in {avg_days}d avg', bounce_tip, dot=True)}
             {hover_item('Remaining', clean_label(opportunity_remaining), remaining_tip, dot=True)}
+            {hover_item('Overreaction', clean_label(overreaction), overreaction_tip, dot=True)}
             {hover_item('History', history, history_tip, dot=True)}
             {hover_item('Attention', clean_label(attention), attention_tip, dot=True)}
             {hover_item('Volume trend', clean_label(volume_trend), volume_trend_tip, dot=True)}
@@ -2120,6 +2357,19 @@ for r in results:
         "Opportunity Remaining %": r.get("opportunity_remaining_pct"),
         "Opportunity Remaining Score": r.get("opportunity_remaining_score"),
         "Move Completed %": r.get("move_completed_pct"),
+        "Overreaction Score": r.get("overreaction_score"),
+        "Overreaction": r.get("overreaction_label"),
+        "Panic Shock Score": r.get("panic_shock_score"),
+        "Panic Shock": r.get("panic_label"),
+        "Panic Reason": r.get("panic_reason"),
+        "Panic Drop %": r.get("panic_drop_pct"),
+        "Panic Drop Days": r.get("panic_drop_days"),
+        "Panic Drop Date": r.get("panic_drop_date"),
+        "Panic Volume Ratio": r.get("panic_volume_ratio"),
+        "Narrative Score": r.get("narrative_score"),
+        "Narrative": r.get("narrative_label"),
+        "Narrative Reason": r.get("narrative_reason"),
+        "Red Flags": r.get("red_flag_label"),
         "Avg Max Bounce": r.get("avg_max_bounce_pct"),
         "Avg Days to Max": r.get("avg_days_to_max_bounce"),
         "Successful Swings": r.get("profitable_event_count"),
