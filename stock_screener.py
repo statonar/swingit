@@ -1,5 +1,5 @@
 """
-SwingIt V4 — RSI Panic + Catalyst Swing Engine
+SwingIt V4.1 — RSI Panic + Catalyst Swing Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -12,6 +12,7 @@ Not financial advice. Use as a watchlist engine, not an entry/exit system.
 
 from io import StringIO
 import datetime
+import html
 import math
 
 import pandas as pd
@@ -27,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V4",
+    page_title="SwingIt V4.1",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -97,6 +98,35 @@ st.markdown(
     .hot-title { font-size:1.05rem; font-weight:900; margin-bottom:3px; }
     .hot-score { font-size:2.0rem; font-weight:950; color:var(--accent); line-height:1.1; }
     .hot-meta { color:var(--muted); font-size:.86rem; margin-top:8px; line-height:1.45; }
+    .hover-tip {
+        position:relative;
+        display:inline-block;
+        cursor:help;
+        border-bottom:1px dotted rgba(37,99,235,.45);
+    }
+    .hover-tip .tip-box {
+        visibility:hidden;
+        opacity:0;
+        transition:opacity .15s ease;
+        position:absolute;
+        z-index:9999;
+        left:0;
+        top:125%;
+        width:310px;
+        background:#111827;
+        color:#f9fafb!important;
+        border-radius:12px;
+        padding:12px 14px;
+        box-shadow:0 14px 35px rgba(15,23,42,.25);
+        font-size:.78rem;
+        line-height:1.35;
+        font-weight:500;
+        text-align:left;
+        border:1px solid rgba(255,255,255,.12);
+    }
+    .hover-tip .tip-box strong, .hover-tip .tip-box span { color:#f9fafb!important; }
+    .hover-tip:hover .tip-box { visibility:visible; opacity:1; }
+    .hot-card:nth-child(3) .hover-tip .tip-box { right:0; left:auto; }
     .tag {
         display:inline-block;
         border-radius:999px;
@@ -130,7 +160,7 @@ if "scan_meta" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V4")
+    st.markdown("## 🔥 SwingIt V4.1")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -771,26 +801,70 @@ def candidate_note(row):
     return " · ".join(pieces)
 
 
+def _safe_html(value):
+    return html.escape("—" if value is None or pd.isna(value) else str(value))
+
+
+def _volume_score_from_ratio(volume_ratio):
+    vr = volume_ratio or 0
+    if vr >= 2.5:
+        return 100
+    if vr >= 1.5:
+        return 70
+    if vr >= 1.1:
+        return 40
+    return 0
+
+
 def hot_card(rank, row):
     medal = ["🥇", "🥈", "🥉"][rank] if rank < 3 else f"#{rank + 1}"
+    ticker = _safe_html(row.get("Ticker"))
+    score = row.get("Swing Score", "—")
     potential_price = row.get("Potential Swing Price", "—")
     current_price = row.get("Price", "—")
+    history_score = row.get("History Score", "—")
+    opp_score = row.get("Opportunity Score", "—")
+    catalyst_score = row.get("Catalyst Score", "—")
+    volume_ratio = row.get("Volume Ratio")
+    volume_score = _volume_score_from_ratio(volume_ratio)
+    catalyst = _safe_html(row.get("Catalyst", ""))
+    catalyst_reason = _safe_html(row.get("Catalyst Reason", "No catalyst details available."))
+    headline = _safe_html(row.get("Headline", "No headline available."))
+    news = _safe_html(row.get("News", ""))
+
+    score_tip = f"""
+        <strong>Swing Score ingredients</strong><br>
+        🧠 Historical swing behavior: {history_score}/100 × 40%<br>
+        🎯 Current RSI opportunity: {opp_score}/100 × 32%<br>
+        📰 Catalyst/news: {catalyst_score}/100 × 18%<br>
+        📊 Volume confirmation: {volume_score}/100 × 10%<br><br>
+        This is a watchlist score, not an entry signal.
+    """
+    news_tip = f"""
+        <strong>News/catalyst read</strong><br>
+        {catalyst_reason}<br><br>
+        <strong>Top headline</strong><br>
+        {headline}<br><br>
+        Label: {news}
+    """
+
     return f"""
     <div class="hot-card">
-        <div class="hot-title">{medal} {row['Ticker']}</div>
-        <div class="hot-score">{row['Swing Score']}</div>
+        <div class="hot-title">{medal} {ticker}</div>
+        <div class="hot-score hover-tip">{score}
+            <div class="tip-box">{score_tip}</div>
+        </div>
         <div class="small-muted">Swing Score</div>
         <div class="hot-meta">
-            {row['Opportunity']}<br>
+            {_safe_html(row.get('Opportunity'))}<br>
             Current {current_price} → Swing target {potential_price}<br>
-            RSI {row['RSI']} · Potential {row['Avg Max Bounce']}<br>
-            Avg max in {row['Avg Days to Max']} days · {row['History']}<br>
-            {row.get('Catalyst', '')}<br>
-            {row.get('Confidence', '')}
+            RSI {_safe_html(row.get('RSI'))} · Potential {_safe_html(row.get('Avg Max Bounce'))}<br>
+            Avg max in {_safe_html(row.get('Avg Days to Max'))} days · {_safe_html(row.get('History'))}<br>
+            <span class="hover-tip">{catalyst}<div class="tip-box">{news_tip}</div></span><br>
+            {_safe_html(row.get('Confidence', ''))}
         </div>
     </div>
     """
-
 
 def mini_chart(data):
     df = data["df"].copy()
@@ -851,7 +925,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V4")
+st.markdown("# 🔥 SwingIt V4.1")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
@@ -951,6 +1025,7 @@ for r in results:
         "Catalyst Score": r.get("catalyst_score"),
         "Catalyst Reason": r.get("catalyst_reason"),
         "Volume Ratio": r.get("volume_ratio"),
+        "Volume Score": _volume_score_from_ratio(r.get("volume_ratio")),
         "News": r.get("news_label"),
         "Headline": r.get("news_headline"),
         "History Score": r.get("history_score"),
@@ -1002,7 +1077,7 @@ compact_cols = [
     "Ticker", "Swing Score", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst", "Catalyst Score"
 ]
 research_cols = compact_cols + [
-    "Catalyst Reason", "Volume Ratio", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "Catalyst Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -1015,6 +1090,7 @@ st.dataframe(
         "Swing Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Confidence Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Catalyst Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
+        "Volume Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "RSI": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
         "Price": st.column_config.NumberColumn(format="$%.2f"),
         "Potential Swing Price": st.column_config.NumberColumn(format="$%.2f"),
@@ -1108,6 +1184,6 @@ csv = export.to_csv(index=False)
 st.download_button(
     "Download watchlist CSV",
     data=csv,
-    file_name=f"swingit_v4_{datetime.date.today()}.csv",
+    file_name=f"swingit_v4_1_{datetime.date.today()}.csv",
     mime="text/csv",
 )
