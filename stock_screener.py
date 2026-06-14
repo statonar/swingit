@@ -1988,6 +1988,93 @@ def ranking_column_for(mode: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Qualified Candidate Gate — keeps the top cards from forcing weak names into view
+# ──────────────────────────────────────────────────────────────────────────────
+CANDIDATE_GATE_MODES = ["Balanced", "Strict", "Loose"]
+
+CANDIDATE_GATE_HELP = {
+    "Balanced": "Default. Shows stocks that are at least decent swing candidates without being too picky.",
+    "Strict": "Only cleaner setups. Useful when you want fewer, higher-quality ideas.",
+    "Loose": "Allows earlier/speculative setups. Useful for small Favorites lists or idea discovery.",
+}
+
+
+def _text_has_any(value, words):
+    text = str(value or "").lower()
+    return any(w.lower() in text for w in words)
+
+
+def has_major_red_flag(row):
+    return _text_has_any(row.get("Red Flags", ""), ["major red", "possible red flag"])
+
+
+def is_extended_stage(row):
+    return _text_has_any(row.get("Rebound Stage", ""), ["extended"])
+
+
+def is_bad_spring(row):
+    return _text_has_any(row.get("Spring", ""), ["fired down", "accelerating down", "weakening"])
+
+
+def qualifies_as_candidate(row, gate_mode="Balanced"):
+    """Return (qualifies, reason) for whether a ticker deserves a Top Opportunity card.
+
+    The card grid should not force 10 names if the selected universe only has a few
+    legitimate swing candidates. This gate is intentionally separate from View By:
+    View By ranks candidates; this gate decides whether a stock belongs in the cards.
+    """
+    swing = _rank_num(row, "Swing Score")
+    setup = _rank_num(row, "Setup Quality")
+    opp_remaining = _rank_num(row, "Opportunity Remaining %")
+    opp_remaining_score = _rank_num(row, "Opportunity Remaining Score")
+    rsi = _rank_num(row, "RSI", 999)
+    overreaction = _rank_num(row, "Overreaction Score")
+    spring_score = _rank_num(row, "Spring Score")
+    stage_score = _rank_num(row, "Rebound Stage Score")
+    confidence = _rank_num(row, "Confidence Score")
+    history = _rank_num(row, "History Score")
+
+    # Fall back to the score if the percent is unavailable.
+    if opp_remaining <= 0 and opp_remaining_score > 0:
+        opp_remaining = opp_remaining_score
+
+    bad_stage = is_extended_stage(row)
+    bad_spring = is_bad_spring(row)
+    red_flag = has_major_red_flag(row)
+
+    if gate_mode == "Strict":
+        core = swing >= 70 and opp_remaining >= 45 and rsi <= 50 and not bad_stage and history >= 55 and confidence >= 45
+        ready = setup >= 78 and opp_remaining >= 40 and not bad_spring and stage_score >= 55 and spring_score >= 45
+        over = overreaction >= 78 and opp_remaining >= 50 and not red_flag
+    elif gate_mode == "Loose":
+        core = swing >= 50 and opp_remaining >= 25 and rsi <= 60 and not bad_stage
+        ready = setup >= 60 and opp_remaining >= 20 and not bad_spring
+        over = overreaction >= 55 and opp_remaining >= 25 and not red_flag
+    else:  # Balanced
+        core = swing >= 60 and opp_remaining >= 35 and rsi <= 55 and not bad_stage
+        ready = setup >= 70 and opp_remaining >= 30 and not bad_spring
+        over = overreaction >= 70 and opp_remaining >= 40 and not red_flag
+
+    if core:
+        return True, "Core swing candidate"
+    if ready:
+        return True, "Ready-now candidate"
+    if over:
+        return True, "Overreaction candidate"
+    return False, "Did not pass candidate gate"
+
+
+def apply_candidate_gate(frame: pd.DataFrame, gate_mode="Balanced") -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    out = frame.copy()
+    gate_results = out.apply(lambda row: qualifies_as_candidate(row, gate_mode), axis=1)
+    out["Candidate Gate"] = [x[0] for x in gate_results]
+    out["Candidate Type"] = [x[1] for x in gate_results]
+    return out[out["Candidate Gate"]].copy()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Visual helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def format_pct(value):
@@ -2673,6 +2760,22 @@ with rank_help_col:
         unsafe_allow_html=True,
     )
 
+st.markdown("### ✅ Candidate Quality Gate")
+gate_col, gate_help_col = st.columns([1.2, 2.8])
+with gate_col:
+    candidate_gate_mode = st.selectbox(
+        "Top card quality",
+        CANDIDATE_GATE_MODES,
+        index=0,
+        key="candidate_gate_mode",
+        help="Prevents weak names from being forced into the Best Swing Opportunities cards.",
+    )
+with gate_help_col:
+    st.markdown(
+        f"<div class='small-muted' style='padding-top:1.9rem;'>{_safe_html(CANDIDATE_GATE_HELP.get(candidate_gate_mode, ''))}</div>",
+        unsafe_allow_html=True,
+    )
+
 rank_col = ranking_column_for(ranking_mode)
 df_sorted = df.sort_values([rank_col, "Setup Quality", "Swing Score", "RSI"], ascending=[False, False, False, True], na_position="last").reset_index(drop=True)
 df_sorted["Active Rank Score"] = pd.to_numeric(df_sorted[rank_col], errors="coerce").fillna(0).round(0).astype(int)
@@ -2700,8 +2803,12 @@ if active_filter != "All":
             st.rerun()
 
 st.markdown("## 🔥 Best Swing Opportunities")
-st.caption(f"Top 10 viewed by **{ranking_mode}**. Change View By above to ask a different question.")
-top = filtered_df.head(10)
+qualified_df = apply_candidate_gate(filtered_df, candidate_gate_mode).reset_index(drop=True)
+st.caption(
+    f"Showing up to 10 **qualified** candidates viewed by **{ranking_mode}**. "
+    f"Gate: **{candidate_gate_mode}** · {len(qualified_df)} of {len(filtered_df)} visible tickers qualify."
+)
+top = qualified_df.head(10)
 if not top.empty:
     for start in range(0, len(top), 5):
         row_slice = top.iloc[start:start + 5]
@@ -2709,6 +2816,11 @@ if not top.empty:
         for offset, (_, row) in enumerate(row_slice.iterrows()):
             with card_cols[offset]:
                 st.markdown(hot_card(start + offset, row), unsafe_allow_html=True)
+else:
+    st.info(
+        "No qualified swing candidates passed the current gate. "
+        "Try **Loose**, scan a broader universe, or review the full leaderboard below."
+    )
 
 st.divider()
 st.markdown("## Watchlist Leaderboard")
