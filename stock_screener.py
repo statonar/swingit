@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V5.6",
+    page_title="SwingIt V5.6.1",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -93,8 +93,9 @@ st.markdown(
         border-radius:16px;
         padding:12px 13px 10px 13px;
         box-shadow:0 5px 14px rgba(15,23,42,.05);
-        min-height:178px;
+        min-height:214px;
         margin-bottom:10px;
+        overflow:visible;
     }
     .hot-title { font-size:.92rem; font-weight:900; margin-bottom:8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .company-name { color:var(--muted); font-weight:700; font-size:.78rem; margin-left:4px; }
@@ -102,8 +103,22 @@ st.markdown(
     .score-tile { background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:6px 5px; }
     .score-num { font-size:1.12rem; font-weight:950; color:var(--accent); line-height:1.05; }
     .score-label { font-size:.58rem; color:var(--muted); text-transform:uppercase; letter-spacing:.02em; margin-top:2px; }
-    .hot-meta { color:var(--muted); font-size:.70rem; margin-top:5px; line-height:1.34; }
-    .card-item { margin:2px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .hot-meta { color:var(--muted); font-size:.69rem; margin-top:6px; line-height:1.42; }
+    .card-item {
+        display:block;
+        width:100%;
+        margin:2px 0;
+        white-space:nowrap;
+        overflow:visible;
+        text-overflow:clip;
+    }
+    .card-value {
+        display:inline-block;
+        max-width:calc(100% - 78px);
+        overflow:hidden;
+        text-overflow:ellipsis;
+        vertical-align:bottom;
+    }
     .item-title { color:var(--text); font-weight:800; }
     .dot { display:inline-block; width:9px; height:9px; border-radius:999px; margin-right:5px; vertical-align:middle; }
     .dot-green { background:#16a34a; }
@@ -113,9 +128,15 @@ st.markdown(
     .dot-gray { background:#9ca3af; }
     .hover-tip {
         position:relative;
-        display:inline-block;
         cursor:help;
-        border-bottom:1px dotted rgba(37,99,235,.45);
+    }
+    .hover-tip::after {
+        content:"";
+        position:absolute;
+        left:0;
+        right:0;
+        bottom:0;
+        border-bottom:1px dotted rgba(37,99,235,.35);
     }
     .hover-tip .tip-box {
         visibility:hidden;
@@ -139,7 +160,8 @@ st.markdown(
     }
     .hover-tip .tip-box strong, .hover-tip .tip-box span { color:#f9fafb!important; }
     .hover-tip:hover .tip-box { visibility:visible; opacity:1; }
-    .hot-card:nth-child(3) .hover-tip .tip-box { right:0; left:auto; }
+    .hot-card:nth-child(5n) .hover-tip .tip-box,
+    .hot-card:nth-child(5n-1) .hover-tip .tip-box { right:0; left:auto; }
     .tag {
         display:inline-block;
         border-radius:999px;
@@ -175,7 +197,7 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V5.6")
+    st.markdown("## 🔥 SwingIt V5.6.1")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -1112,7 +1134,13 @@ def hover_item(title, value, tip, dot=False):
     safe_value = _safe_html(clean_label(value))
     safe_tip = tip if isinstance(tip, str) else _safe_html(tip)
     dot_html = f"<span class='dot {dot_class(value)}'></span>" if dot else ""
-    return f"<div class='card-item hover-tip'>{dot_html}<span class='item-title'>{safe_title}:</span> {safe_value}<div class='tip-box'>{safe_tip}</div></div>"
+    return (
+        f"<div class='card-item hover-tip'>"
+        f"{dot_html}<span class='item-title'>{safe_title}:</span> "
+        f"<span class='card-value'>{safe_value}</span>"
+        f"<div class='tip-box'>{safe_tip}</div>"
+        f"</div>"
+    )
 
 
 def _volume_score_from_ratio(volume_ratio):
@@ -1336,7 +1364,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V5.6")
+st.markdown("# 🔥 SwingIt V5.6.1")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
