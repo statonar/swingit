@@ -1,5 +1,5 @@
 """
-SwingIt V10.3 — Profile Defaults + Morning Report + Trading Terminal UI
+SwingIt V10.4 — Universe Accuracy + Profile Defaults + Morning Report
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V10.3",
+    page_title="SwingIt V10.4",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -352,7 +352,7 @@ UNIVERSE_OPTIONS = [
 ]
 
 UNIVERSE_HINTS = {
-    "⭐ SwingIt Elite (Recommended)": "VOO + VTI/ITOT + QQQM style quality universe",
+    "⭐ SwingIt Elite (Recommended)": "S&P 500 + broad U.S. market + Nasdaq-100",
     "⭐ Favorites": "Your saved ticker universe",
     "📂 CSV upload": "Upload your own ticker list",
     "🧠 Institutional Favorites": "Large-cap names held across elite funds",
@@ -363,10 +363,10 @@ UNIVERSE_HINTS = {
     "Russell 1000": "Top 1,000 U.S. listed stocks by market cap",
     "Russell 3000": "Top 3,000 U.S. listed stocks by market cap",
     "FXAIX / VOO Holdings": "S&P 500 style holdings",
-    "VTI Holdings": "Total-market style holdings via ITOT proxy",
+    "VTI Holdings": "Broad total-market universe, capped for scanning speed",
     "QQQM Holdings": "Nasdaq-100 ETF holdings",
-    "SCHG Holdings": "Large-cap growth ETF holdings",
-    "VGT Holdings": "Technology ETF holdings",
+    "SCHG Holdings": "SCHG-style large-cap growth universe",
+    "VGT Holdings": "VGT-style technology universe, full-sized instead of top-holdings only",
     "SMH Holdings": "Semiconductor ETF holdings",
     "SOXX Holdings": "Semiconductor ETF holdings",
     "Custom list": "Paste tickers manually",
@@ -381,7 +381,7 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V10.3</div>
+            <div class="terminal-title">🔥 SwingIt V10.4</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
@@ -971,6 +971,8 @@ def get_nasdaq_stock_screener_df():
     market_col = lower_map.get("marketcap") or lower_map.get("marketcap") or lower_map.get("marketcapitalization")
     etf_col = lower_map.get("etf")
     country_col = lower_map.get("country")
+    sector_col = lower_map.get("sector")
+    industry_col = lower_map.get("industry")
 
     out = pd.DataFrame()
     out["Ticker"] = df[symbol_col].apply(clean_yahoo_ticker)
@@ -978,6 +980,8 @@ def get_nasdaq_stock_screener_df():
     out["MarketCap"] = df[market_col].apply(parse_market_cap) if market_col in df.columns else 0.0
     out["ETF"] = df[etf_col].astype(str).str.upper() if etf_col in df.columns else "N"
     out["Country"] = df[country_col].astype(str) if country_col in df.columns else "United States"
+    out["Sector"] = df[sector_col].astype(str) if sector_col in df.columns else ""
+    out["Industry"] = df[industry_col].astype(str) if industry_col in df.columns else ""
 
     out = out[out["Ticker"].astype(bool)].copy()
     out = out[~out["Ticker"].str.contains(r"[.$^ ]", regex=True, na=False)]
@@ -996,6 +1000,83 @@ def get_broad_us_tickers(limit=None):
     if limit:
         df = df.head(int(limit))
     return df["Ticker"].tolist()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sector_tickers(sector_keywords=None, industry_keywords=None, limit=350, min_count=50, fill_with_broad=False):
+    """Build a fuller ETF-style universe from Nasdaq listed-stock metadata.
+
+    Some ETF issuer full-holdings downloads are fragile on Streamlit Cloud. For
+    sector ETFs like VGT, this gives us a much more realistic full-sized universe
+    than the old 38-name curated fallback while still keeping the scan relevant.
+    """
+    sector_keywords = [x.lower() for x in (sector_keywords or [])]
+    industry_keywords = [x.lower() for x in (industry_keywords or [])]
+    df = get_nasdaq_stock_screener_df().copy()
+    sector = df.get("Sector", pd.Series("", index=df.index)).astype(str).str.lower()
+    industry = df.get("Industry", pd.Series("", index=df.index)).astype(str).str.lower()
+
+    mask = pd.Series(False, index=df.index)
+    for kw in sector_keywords:
+        mask = mask | sector.str.contains(kw, na=False)
+    for kw in industry_keywords:
+        mask = mask | industry.str.contains(kw, na=False)
+
+    filtered = df[mask].sort_values("MarketCap", ascending=False)
+    tickers = filtered["Ticker"].tolist()
+
+    if fill_with_broad and len(tickers) < min_count:
+        broad = df.sort_values("MarketCap", ascending=False)["Ticker"].tolist()
+        tickers = dedupe(tickers + broad)
+
+    if limit:
+        tickers = tickers[: int(limit)]
+    return dedupe(tickers)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_vgt_universe():
+    """VGT-style technology universe.
+
+    VGT currently has 300+ holdings. If an official holdings file is unavailable,
+    use a full-sized technology-sector universe from Nasdaq metadata rather than
+    the old top-holdings-only curated list.
+    """
+    try:
+        tickers = get_sector_tickers(
+            sector_keywords=["technology"],
+            industry_keywords=["software", "semiconductor", "computer", "electronic", "information"],
+            limit=325,
+            min_count=250,
+            fill_with_broad=False,
+        )
+        if len(tickers) >= 250:
+            return tickers
+    except Exception:
+        pass
+    # Fallback: curated tech leaders + broad market fill so this never collapses to 38.
+    return dedupe(VGT_NAMES + GROWTH_CORE + get_broad_us_tickers(325))[:325]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_schg_universe():
+    """SCHG-style large-cap growth universe.
+
+    SCHG is broader than our old short curated list, so build a larger growth-like
+    universe from Nasdaq-100 plus large-cap technology/communication/consumer and
+    healthcare names.
+    """
+    try:
+        growth = get_sector_tickers(
+            sector_keywords=["technology", "consumer", "health", "telecommunications", "communication"],
+            industry_keywords=["software", "semiconductor", "internet", "biotechnology", "pharmaceutical", "retail"],
+            limit=260,
+            min_count=150,
+            fill_with_broad=True,
+        )
+        return dedupe(get_nasdaq100() + SCHG_NAMES + growth)[:260]
+    except Exception:
+        return dedupe(get_nasdaq100() + SCHG_NAMES + GROWTH_CORE + get_broad_us_tickers(260))[:260]
 
 
 ISHARES_PRODUCTS = {
@@ -1212,12 +1293,12 @@ HIGH_OPPORTUNITY = [
 ETF_LISTS = {
     # ETF/mutual-fund proxies. Where possible, these use live ETF holdings instead of
     # short curated lists so broad universes do not accidentally shrink.
-    "FXAIX": lambda: get_sp500_etf_proxy(),
-    "VOO": lambda: get_sp500_etf_proxy(),
+    "FXAIX": lambda: get_sp500(),
+    "VOO": lambda: get_sp500(),
     "VTI": lambda: get_total_market(),
     "QQQM": lambda: get_nasdaq100(),
-    "SCHG": lambda: SCHG_NAMES,
-    "VGT": lambda: VGT_NAMES,
+    "SCHG": lambda: get_schg_universe(),
+    "VGT": lambda: get_vgt_universe(),
     "SMH": lambda: SMH_NAMES,
     "SOXX": lambda: SOXX_NAMES,
 }
