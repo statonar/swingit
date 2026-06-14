@@ -1,5 +1,5 @@
 """
-SwingIt V5 — RSI Panic + Catalyst + TTM Spring Engine
+SwingIt V5.1 — RSI Panic + Catalyst + Multi-Timeframe TTM Spring Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V5",
+    page_title="SwingIt V5.1",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -160,7 +160,7 @@ if "scan_meta" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V5")
+    st.markdown("## 🔥 SwingIt V5.1")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -197,6 +197,13 @@ with st.sidebar:
         "Add catalyst/news score",
         value=True,
         help="Adds a lightweight Yahoo Finance headline catalyst score. It can slow the scan a little, so turn it off if the app feels laggy."
+    )
+
+    spring_timeframe = st.selectbox(
+        "TTM Spring timeframe",
+        ["1D", "1H"],
+        index=0,
+        help="1D is better for 1–4 week swing context. 1H is better for near-term timing/watchlist urgency."
     )
 
     st.divider()
@@ -879,7 +886,7 @@ def compute_ttm_spring(df: pd.DataFrame) -> dict:
     }
 
 @st.cache_data(ttl=300, show_spinner=False)
-def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include_news_lookup: bool = True):
+def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include_news_lookup: bool = True, spring_timeframe: str = "1D"):
     try:
         raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True, threads=False)
         df = normalize_ohlcv(raw, ticker)
@@ -891,7 +898,18 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
         rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
         sma50 = ta.trend.SMAIndicator(close, window=50).sma_indicator()
         sma200 = ta.trend.SMAIndicator(close, window=200).sma_indicator() if len(close) >= 200 else pd.Series(index=close.index, dtype=float)
-        spring = compute_ttm_spring(df)
+
+        # TTM Spring can be calculated on daily bars for swing context or hourly bars for near-term timing.
+        spring_tf = spring_timeframe or "1D"
+        spring_df = df
+        if spring_tf == "1H":
+            hourly_raw = yf.download(ticker, period="90d", interval="1h", progress=False, auto_adjust=True, threads=False)
+            hourly_df = normalize_ohlcv(hourly_raw, ticker)
+            if not hourly_df.empty and len(hourly_df) >= 80:
+                spring_df = hourly_df
+            else:
+                spring_tf = "1D"
+        spring = compute_ttm_spring(spring_df)
 
         current_price = float(close.iloc[-1])
         current_rsi = float(rsi_series.dropna().iloc[-1]) if not rsi_series.dropna().empty else None
@@ -944,6 +962,8 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "avg_vol_20d": int(avg_vol_20d) if avg_vol_20d else None,
             "current_volume": int(current_volume) if current_volume else None,
             "volume_ratio": round(float(volume_ratio), 2) if volume_ratio is not None else None,
+            "spring_timeframe": spring_tf,
+            "spring_df": spring_df,
             "spring_score": spring.get("spring_score", 0),
             "spring_label": spring.get("spring_label"),
             "spring_reason": spring.get("spring_reason"),
@@ -1031,6 +1051,7 @@ def hot_card(rank, row):
     volume_score = _volume_score_from_ratio(volume_ratio)
     catalyst = _safe_html(row.get("Catalyst", ""))
     spring = _safe_html(row.get("Spring", ""))
+    spring_tf = _safe_html(row.get("Spring TF", ""))
     spring_score = row.get("Spring Score", "—")
     spring_reason = _safe_html(row.get("Spring Reason", "No spring details available."))
     catalyst_reason = _safe_html(row.get("Catalyst Reason", "No catalyst details available."))
@@ -1054,6 +1075,7 @@ def hot_card(rank, row):
     """
     spring_tip = f"""
         <strong>TTM Spring read</strong><br>
+        Timeframe: {spring_tf}<br>
         Spring Score: {spring_score}/100<br>
         {spring_reason}<br><br>
         Best use: high Swing Score + strong Catalyst + high Spring Score = stock worth watching closely for your 5m/15m entry process.
@@ -1071,7 +1093,7 @@ def hot_card(rank, row):
             Current {current_price} → Swing target {potential_price}<br>
             RSI {_safe_html(row.get('RSI'))} · Potential {_safe_html(row.get('Avg Max Bounce'))}<br>
             Avg max in {_safe_html(row.get('Avg Days to Max'))} days · {_safe_html(row.get('History'))}<br>
-            <span class="hover-tip">{spring} {spring_score}/100<div class="tip-box">{spring_tip}</div></span><br>
+            <span class="hover-tip">{spring_tf} {spring} {spring_score}/100<div class="tip-box">{spring_tip}</div></span><br>
             <span class="hover-tip">{catalyst}<div class="tip-box">{news_tip}</div></span><br>
             {_safe_html(row.get('Confidence', ''))}
         </div>
@@ -1082,14 +1104,16 @@ def mini_chart(data):
     df = data["df"].copy()
     dates = df.index
     close = df["Close"].astype(float)
+    spring_df = data.get("spring_df", df).copy() if data.get("spring_df") is not None else df.copy()
+    spring_dates = spring_df.index
 
     fig = make_subplots(
         rows=3,
         cols=1,
-        shared_xaxes=True,
+        shared_xaxes=False,
         row_heights=[0.56, 0.24, 0.20],
         vertical_spacing=0.05,
-        subplot_titles=("Price + moving averages", "RSI (14)", "TTM momentum + squeeze dots"),
+        subplot_titles=("Price + moving averages", "RSI (14)", f"TTM momentum + squeeze dots ({data.get('spring_timeframe', '1D')})"),
     )
 
     fig.add_trace(
@@ -1123,17 +1147,17 @@ def mini_chart(data):
     ttm_mom = data.get("ttm_momentum_series")
     squeeze_series = data.get("squeeze_on_series")
     if ttm_mom is not None and not ttm_mom.dropna().empty:
-        mom = ttm_mom.reindex(dates)
+        mom = ttm_mom.reindex(spring_dates)
         fig.add_trace(
-            go.Bar(x=dates, y=mom, name="TTM momentum", marker_color=["#16803c" if (pd.notna(v) and v >= 0) else "#b42318" for v in mom], opacity=0.65),
+            go.Bar(x=spring_dates, y=mom, name="TTM momentum", marker_color=["#16803c" if (pd.notna(v) and v >= 0) else "#b42318" for v in mom], opacity=0.65),
             row=3, col=1,
         )
-        dot_y = pd.Series(0, index=dates)
+        dot_y = pd.Series(0, index=spring_dates)
         if squeeze_series is not None and len(squeeze_series):
-            sq = squeeze_series.reindex(dates).fillna(False)
+            sq = squeeze_series.reindex(spring_dates).fillna(False)
             dot_colors = ["#b42318" if bool(v) else "#16803c" for v in sq]
             fig.add_trace(
-                go.Scatter(x=dates, y=dot_y, mode="markers", marker=dict(size=5, color=dot_colors), name="Squeeze dots"),
+                go.Scatter(x=spring_dates, y=dot_y, mode="markers", marker=dict(size=5, color=dot_colors), name="Squeeze dots"),
                 row=3, col=1,
             )
 
@@ -1155,7 +1179,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V5")
+st.markdown("# 🔥 SwingIt V5.1")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
@@ -1171,6 +1195,7 @@ if run:
         "profit_target": profit_target,
         "bounce_window": bounce_window,
         "include_news": include_news,
+        "spring_timeframe": spring_timeframe,
         "tickers_scanned": len(tickers),
         "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
     }
@@ -1182,7 +1207,7 @@ if run:
     results = []
     for i, ticker in enumerate(tickers):
         status.caption(f"Checking {ticker}…")
-        candidate = compute_candidate(ticker, profit_target, bounce_window, include_news)
+        candidate = compute_candidate(ticker, profit_target, bounce_window, include_news, spring_timeframe)
         if candidate:
             results.append(candidate)
         progress.progress((i + 1) / len(tickers))
@@ -1221,10 +1246,11 @@ meta = st.session_state.scan_meta or {
 active_universe = meta.get("universe", universe)
 active_profit_target = meta.get("profit_target", profit_target)
 active_bounce_window = meta.get("bounce_window", bounce_window)
+active_spring_timeframe = meta.get("spring_timeframe", spring_timeframe)
 active_tickers_scanned = meta.get("tickers_scanned", 0)
 
 st.markdown(
-    f"<div class='small-muted'>Latest scan: {active_universe} · Profit goal {active_profit_target}% · Swing window {active_bounce_window} trading days · {meta.get('run_date', '')}</div>",
+    f"<div class='small-muted'>Latest scan: {active_universe} · Profit goal {active_profit_target}% · Swing window {active_bounce_window} trading days · TTM {active_spring_timeframe} · {meta.get('run_date', '')}</div>",
     unsafe_allow_html=True,
 )
 st.divider()
@@ -1252,6 +1278,7 @@ for r in results:
         "Confidence": r.get("confidence_label"),
         "Confidence Score": r.get("confidence_score"),
         "Spring": r.get("spring_label"),
+        "Spring TF": r.get("spring_timeframe"),
         "Spring Score": r.get("spring_score"),
         "Spring Reason": r.get("spring_reason"),
         "Squeeze Bars": r.get("squeeze_bars"),
@@ -1311,7 +1338,7 @@ ascending = sort_direction == "Ascending"
 display = df_sorted.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
-    "Ticker", "Swing Score", "Spring Score", "Spring", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst", "Catalyst Score"
+    "Ticker", "Swing Score", "Spring TF", "Spring Score", "Spring", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst", "Catalyst Score"
 ]
 research_cols = compact_cols + [
     "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
@@ -1344,7 +1371,7 @@ with st.expander("What the Swing Score means"):
     st.markdown(f"""
     **Swing Score V5** is a watchlist score: *is this stock washed out, historically bouncy, and does it have a reason to move?*
 
-    **Spring Score** is separate. It uses a TTM Squeeze-style calculation to ask: *is volatility compressed or recently released, and is momentum improving right now?* A high Spring Score is not a buy signal by itself, but it can help you prioritize which high Swing Score names are closest to becoming actionable.
+    **Spring Score** is separate. It uses the selected TTM timeframe from the sidebar (1D or 1H) and a TTM Squeeze-style calculation to ask: *is volatility compressed or recently released, and is momentum improving right now?* A high Spring Score is not a buy signal by itself, but it can help you prioritize which high Swing Score names are closest to becoming actionable.
 
     It combines:
 
@@ -1371,7 +1398,7 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V5 Swing Score weighting: 40% historical swing behavior, 32% current RSI opportunity, 18% catalyst/news, 10% volume confirmation. Spring Score is shown separately so timing does not overpower the historical/catalyst watchlist model.
+    Current V5.1 Swing Score weighting: 40% historical swing behavior, 32% current RSI opportunity, 18% catalyst/news, 10% volume confirmation. Spring Score is shown separately so timing does not overpower the historical/catalyst watchlist model.
 
     This is meant to produce a **watchlist**, not a buy signal. Entries should still come from price action, VWAP, volume, support/reclaim behavior, and your 5m/15m process.
     """)
@@ -1403,12 +1430,12 @@ if detail:
     if detail.get("confidence_label"):
         tags.append(f"<span class='tag tag-blue'>{detail.get('confidence_label')}</span>")
     if detail.get("spring_label"):
-        tags.append(f"<span class='tag tag-amber'>{detail.get('spring_label')} · {detail.get('spring_score', 0)}/100</span>")
+        tags.append(f"<span class='tag tag-amber'>TTM {detail.get('spring_timeframe', '1D')} · {detail.get('spring_label')} · {detail.get('spring_score', 0)}/100</span>")
     if detail.get("catalyst_label"):
         tags.append(f"<span class='tag tag-blue'>{detail.get('catalyst_label')} · {detail.get('catalyst_score', 0)}/100</span>")
     st.markdown("".join(tags), unsafe_allow_html=True)
     if detail.get("spring_reason"):
-        st.caption(f"TTM spring read: {detail['spring_reason']}")
+        st.caption(f"TTM spring read ({detail.get('spring_timeframe', '1D')}): {detail['spring_reason']}")
     if detail.get("catalyst_reason"):
         st.caption(f"Catalyst read: {detail['catalyst_reason']}")
     if detail.get("news_headline"):
@@ -1429,6 +1456,6 @@ csv = export.to_csv(index=False)
 st.download_button(
     "Download watchlist CSV",
     data=csv,
-    file_name=f"swingit_v5_{datetime.date.today()}.csv",
+    file_name=f"swingit_v5_1_{datetime.date.today()}.csv",
     mime="text/csv",
 )
