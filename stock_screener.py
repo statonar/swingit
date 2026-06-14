@@ -1,5 +1,5 @@
 """
-SwingIt V5.3 — RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V5.4 — RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,10 +28,10 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V5.3",
+    page_title="SwingIt V5.4",
     page_icon="🔥",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 st.markdown(
@@ -93,7 +93,7 @@ st.markdown(
         border-radius:18px;
         padding:18px 18px 14px 18px;
         box-shadow:0 8px 22px rgba(15,23,42,.06);
-        min-height:185px;
+        min-height:205px;
     }
     .hot-title { font-size:1.05rem; font-weight:900; margin-bottom:3px; }
     .hot-score { font-size:2.0rem; font-weight:950; color:var(--accent); line-height:1.1; }
@@ -162,7 +162,7 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V5.3")
+    st.markdown("## 🔥 SwingIt V5.4")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -1125,7 +1125,8 @@ def hot_card(rank, row):
         <div class="hot-score hover-tip">{score}
             <div class="tip-box">{score_tip}</div>
         </div>
-        <div class="small-muted">Swing Score · Setup {setup_quality}/100</div>
+        <div class="small-muted">Swing Score</div>
+        <div class="small-muted" style="margin-top:6px;"><strong>Setup Score:</strong> {setup_quality}/100</div>
         <div class="hot-meta">
             {_safe_html(row.get('Opportunity'))}<br>
             Current {current_price} → Swing target {potential_price}<br>
@@ -1218,7 +1219,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V5.3")
+st.markdown("# 🔥 SwingIt V5.4")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
@@ -1394,12 +1395,15 @@ if active_filter != "All":
             st.rerun()
 
 st.markdown("## 🔥 Best Swing Opportunities")
-top = filtered_df.head(3)
+st.caption("Top 10 from the current filter/sort view. Use the sidebar arrow to reopen filters when needed.")
+top = filtered_df.head(10)
 if not top.empty:
-    card_cols = st.columns(len(top))
-    for idx, (_, row) in enumerate(top.iterrows()):
-        with card_cols[idx]:
-            st.markdown(hot_card(idx, row), unsafe_allow_html=True)
+    for start in range(0, len(top), 3):
+        row_slice = top.iloc[start:start + 3]
+        card_cols = st.columns(3)
+        for offset, (_, row) in enumerate(row_slice.iterrows()):
+            with card_cols[offset]:
+                st.markdown(hot_card(start + offset, row), unsafe_allow_html=True)
 
 st.divider()
 st.markdown("## Watchlist Leaderboard")
