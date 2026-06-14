@@ -1,5 +1,5 @@
 """
-SwingIt V5.5 — RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V5.6 — RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V5.5",
+    page_title="SwingIt V5.6",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -96,10 +96,21 @@ st.markdown(
         min-height:178px;
         margin-bottom:10px;
     }
-    .hot-title { font-size:.95rem; font-weight:900; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .hot-score { font-size:1.55rem; font-weight:950; color:var(--accent); line-height:1.05; }
-    .hot-meta { color:var(--muted); font-size:.74rem; margin-top:6px; line-height:1.32; }
-    .hot-setup { color:var(--muted); font-size:.74rem; margin-top:3px; }
+    .hot-title { font-size:.92rem; font-weight:900; margin-bottom:8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .company-name { color:var(--muted); font-weight:700; font-size:.78rem; margin-left:4px; }
+    .score-row { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; margin:6px 0 8px 0; }
+    .score-tile { background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:6px 5px; }
+    .score-num { font-size:1.12rem; font-weight:950; color:var(--accent); line-height:1.05; }
+    .score-label { font-size:.58rem; color:var(--muted); text-transform:uppercase; letter-spacing:.02em; margin-top:2px; }
+    .hot-meta { color:var(--muted); font-size:.70rem; margin-top:5px; line-height:1.34; }
+    .card-item { margin:2px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .item-title { color:var(--text); font-weight:800; }
+    .dot { display:inline-block; width:9px; height:9px; border-radius:999px; margin-right:5px; vertical-align:middle; }
+    .dot-green { background:#16a34a; }
+    .dot-red { background:#dc2626; }
+    .dot-yellow { background:#facc15; }
+    .dot-blue { background:#2563eb; }
+    .dot-gray { background:#9ca3af; }
     .hover-tip {
         position:relative;
         display:inline-block;
@@ -164,7 +175,7 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V5.5")
+    st.markdown("## 🔥 SwingIt V5.6")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -243,6 +254,39 @@ def get_nasdaq100():
             if col in table.columns:
                 return table[col].dropna().astype(str).str.replace(".", "-", regex=False).str.upper().tolist()
     return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_company_lookup(selected_universe: str):
+    """Best-effort ticker → company name map for nicer score cards."""
+    lookup = {}
+    try:
+        if selected_universe == "S&P 500":
+            df = read_wiki_tables("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+            sym_col = "Symbol"
+            name_col = "Security" if "Security" in df.columns else None
+            if name_col:
+                lookup = dict(zip(df[sym_col].astype(str).str.replace(".", "-", regex=False).str.upper(), df[name_col].astype(str)))
+        elif selected_universe == "NASDAQ 100":
+            tables = read_wiki_tables("https://en.wikipedia.org/wiki/Nasdaq-100")
+            for table in tables:
+                table.columns = [str(c).strip() for c in table.columns]
+                sym_col = "Ticker" if "Ticker" in table.columns else "Symbol" if "Symbol" in table.columns else None
+                name_col = "Company" if "Company" in table.columns else "Name" if "Name" in table.columns else None
+                if sym_col and name_col:
+                    lookup = dict(zip(table[sym_col].astype(str).str.replace(".", "-", regex=False).str.upper(), table[name_col].astype(str)))
+                    break
+        elif selected_universe == "Dow Jones 30":
+            lookup = {
+                "AAPL":"Apple", "AMGN":"Amgen", "AXP":"American Express", "BA":"Boeing", "CAT":"Caterpillar", "CRM":"Salesforce",
+                "CSCO":"Cisco", "CVX":"Chevron", "DIS":"Disney", "DOW":"Dow", "GS":"Goldman Sachs", "HD":"Home Depot",
+                "HON":"Honeywell", "IBM":"IBM", "INTC":"Intel", "JNJ":"Johnson & Johnson", "JPM":"JPMorgan Chase", "KO":"Coca-Cola",
+                "MCD":"McDonald’s", "MMM":"3M", "MRK":"Merck", "MSFT":"Microsoft", "NKE":"Nike", "PG":"Procter & Gamble",
+                "TRV":"Travelers", "UNH":"UnitedHealth", "V":"Visa", "VZ":"Verizon", "WBA":"Walgreens Boots Alliance", "WMT":"Walmart"
+            }
+    except Exception:
+        lookup = {}
+    return lookup
 
 
 DOW30 = [
@@ -1045,6 +1089,32 @@ def _safe_html(value):
     return html.escape("—" if value is None or pd.isna(value) else str(value))
 
 
+def clean_label(value):
+    text = "—" if value is None or pd.isna(value) else str(value)
+    for token in ["🔥", "👀", "😴", "🟢", "🟡", "🔴", "⚪", "⚫", "🔵", "🟠", "📰"]:
+        text = text.replace(token, "")
+    return " ".join(text.split()).strip() or "—"
+
+
+def dot_class(value):
+    text = clean_label(value).lower()
+    if any(w in text for w in ["high", "positive", "fresh", "fired up", "loaded & improving", "improving", "oversold"]):
+        return "dot-green"
+    if any(w in text for w in ["negative", "fired down", "accelerating down", "falling", "weakening", "low"]):
+        return "dot-red"
+    if any(w in text for w in ["medium", "watch", "neutral", "early", "mixed", "recent", "panic"]):
+        return "dot-yellow"
+    return "dot-gray"
+
+
+def hover_item(title, value, tip, dot=False):
+    safe_title = _safe_html(title)
+    safe_value = _safe_html(clean_label(value))
+    safe_tip = tip if isinstance(tip, str) else _safe_html(tip)
+    dot_html = f"<span class='dot {dot_class(value)}'></span>" if dot else ""
+    return f"<div class='card-item hover-tip'>{dot_html}<span class='item-title'>{safe_title}:</span> {safe_value}<div class='tip-box'>{safe_tip}</div></div>"
+
+
 def _volume_score_from_ratio(volume_ratio):
     vr = volume_ratio or 0
     if vr >= 2.5:
@@ -1070,74 +1140,119 @@ def attention_label_from_ratio(volume_ratio):
 
 
 def hot_card(rank, row):
-    medal = ["🥇", "🥈", "🥉"][rank] if rank < 3 else f"#{rank + 1}"
+    rank_label = f"#{rank + 1}"
     ticker = _safe_html(row.get("Ticker"))
-    score = row.get("Swing Score", "—")
+    company = clean_label(row.get("Company", ""))
+    company_html = f"<span class='company-name'>{_safe_html(company)}</span>" if company and company != "—" else ""
+
+    swing_score = row.get("Swing Score", "—")
     setup_quality = row.get("Setup Quality", "—")
-    attention = _safe_html(row.get("Attention", ""))
-    potential_price = row.get("Potential Swing Price", "—")
+    spring_score = row.get("Spring Score", "—")
+
     current_price = row.get("Price", "—")
+    potential_price = row.get("Potential Swing Price", "—")
+    avg_max = row.get("Avg Max Bounce", "—")
+    avg_days = row.get("Avg Days to Max", "—")
+    rsi = row.get("RSI", "—")
+    history = row.get("History", "—")
+    confidence = row.get("Confidence", "—")
+    opportunity = row.get("Opportunity", "—")
+    attention = row.get("Attention", "—")
+    catalyst = row.get("Catalyst", "—")
+    spring = row.get("Spring", "—")
+    spring_tf = row.get("Spring TF", "—")
+
     history_score = row.get("History Score", "—")
     opp_score = row.get("Opportunity Score", "—")
     catalyst_score = row.get("Catalyst Score", "—")
     volume_ratio = row.get("Volume Ratio")
-    volume_score = _volume_score_from_ratio(volume_ratio)
-    attention_score = row.get("Attention Score", volume_score)
-    catalyst = _safe_html(row.get("Catalyst", ""))
-    spring = _safe_html(row.get("Spring", ""))
-    spring_tf = _safe_html(row.get("Spring TF", ""))
-    spring_score = row.get("Spring Score", "—")
+    attention_score = row.get("Attention Score", _volume_score_from_ratio(volume_ratio))
     spring_reason = _safe_html(row.get("Spring Reason", "No spring details available."))
     catalyst_reason = _safe_html(row.get("Catalyst Reason", "No catalyst details available."))
     headline = _safe_html(row.get("Headline", "No headline available."))
     news = _safe_html(row.get("News", ""))
 
-    score_tip = f"""
-        <strong>Swing Score ingredients</strong><br>
-        🧠 Historical swing behavior: {history_score}/100 × 46%<br>
-        🎯 Current RSI opportunity: {opp_score}/100 × 34%<br>
-        📰 Catalyst/news: {catalyst_score}/100 × 14%<br>
-        👀 Attention/RVOL: {attention_score}/100 × 6%<br><br>
+    swing_tip = f"""
+        <strong>Swing Score</strong><br>
+        This asks: is this historically a good RSI panic rebound candidate?<br><br>
+        Historical swing behavior: {history_score}/100 × 46%<br>
+        Current RSI opportunity: {opp_score}/100 × 34%<br>
+        Catalyst/news: {catalyst_score}/100 × 14%<br>
+        Attention/RVOL: {attention_score}/100 × 6%
+    """
+    setup_tip = f"""
         <strong>Setup Quality</strong><br>
-        🎯 RSI opportunity: {opp_score}/100 × 25%<br>
-        📰 Catalyst/news: {catalyst_score}/100 × 25%<br>
-        🌀 Spring timing: {spring_score}/100 × 25%<br>
-        👀 Attention/RVOL: {attention_score}/100 × 25%<br><br>
-        Swing Score asks: is this historically a good rebound candidate?<br>
-        Setup Quality asks: is it worth opening in ToS right now?
+        This asks: is this worth opening in ThinkorSwim right now?<br><br>
+        RSI opportunity: {opp_score}/100 × 25%<br>
+        Catalyst/news: {catalyst_score}/100 × 25%<br>
+        TTM Spring timing: {spring_score}/100 × 25%<br>
+        Attention/RVOL: {attention_score}/100 × 25%
+    """
+    spring_score_tip = f"""
+        <strong>Spring Score</strong><br>
+        Timeframe: {_safe_html(spring_tf)}<br>
+        Spring Score: {spring_score}/100<br><br>
+        {spring_reason}
+    """
+    price_tip = f"""
+        <strong>Price / target</strong><br>
+        Current close: {_safe_html(current_price)}<br>
+        Potential swing price: {_safe_html(potential_price)}<br><br>
+        The target uses the stock's average historical max bounce after RSI panic inside your selected swing window.
+    """
+    rsi_tip = f"""
+        <strong>RSI opportunity</strong><br>
+        Current RSI: {_safe_html(rsi)}<br>
+        Opportunity label: {_safe_html(clean_label(opportunity))}<br><br>
+        Lower RSI generally means closer to the panic/rebound zone, but it is not an entry signal by itself.
+    """
+    bounce_tip = f"""
+        <strong>Historical bounce behavior</strong><br>
+        Avg max bounce: {_safe_html(avg_max)}%<br>
+        Avg days to max bounce: {_safe_html(avg_days)} trading days<br><br>
+        This is based on prior RSI &lt;30 panic events and your selected swing window.
+    """
+    history_tip = f"""
+        <strong>Sample size</strong><br>
+        { _safe_html(history) } were found in the lookback period.<br><br>
+        More events means the pattern is easier to trust. One event is interesting, not proof.
+    """
+    attention_tip = f"""
+        <strong>Attention / RVOL</strong><br>
+        Relative volume: {_safe_html(clean_label(attention))}<br>
+        Attention score: {attention_score}/100<br><br>
+        This asks whether the market is actually paying attention right now.
     """
     news_tip = f"""
-        <strong>News/catalyst read</strong><br>
+        <strong>News / catalyst</strong><br>
         {catalyst_reason}<br><br>
         <strong>Top headline</strong><br>
         {headline}<br><br>
-        Label: {news}
+        News label: {news}
     """
-    spring_tip = f"""
-        <strong>TTM Spring read</strong><br>
-        Timeframe: {spring_tf}<br>
-        Spring Score: {spring_score}/100<br>
-        {spring_reason}<br><br>
-        Best use: high Swing Score + strong Catalyst + high Spring Score = stock worth watching closely for your 5m/15m entry process.
+    confidence_tip = f"""
+        <strong>Confidence</strong><br>
+        {_safe_html(clean_label(confidence))}<br><br>
+        Confidence is mainly based on the number of historical RSI panic events. It is separate from how attractive the setup looks.
     """
 
     return f"""
     <div class="hot-card">
-        <div class="hot-title">{medal} {ticker}</div>
-        <div class="hot-score hover-tip">{score}
-            <div class="tip-box">{score_tip}</div>
+        <div class="hot-title">{rank_label} {ticker}{company_html}</div>
+        <div class="score-row">
+            <div class="score-tile hover-tip"><div class="score-num">{swing_score}</div><div class="score-label">Swing</div><div class="tip-box">{swing_tip}</div></div>
+            <div class="score-tile hover-tip"><div class="score-num">{setup_quality}</div><div class="score-label">Setup</div><div class="tip-box">{setup_tip}</div></div>
+            <div class="score-tile hover-tip"><div class="score-num">{spring_score}</div><div class="score-label">Spring</div><div class="tip-box">{spring_score_tip}</div></div>
         </div>
-        <div class="small-muted" style="font-size:.72rem;">Swing Score</div>
-        <div class="hot-setup"><strong>Setup:</strong> {setup_quality}/100</div>
         <div class="hot-meta">
-            {_safe_html(row.get('Opportunity'))}<br>
-            {current_price} → {potential_price}<br>
-            RSI {_safe_html(row.get('RSI'))} · +{_safe_html(row.get('Avg Max Bounce'))}<br>
-            {_safe_html(row.get('Avg Days to Max'))}d avg · {_safe_html(row.get('History'))}<br>
-            👀 {attention}<br>
-            <span class="hover-tip">{spring_tf} {spring} {spring_score}/100<div class="tip-box">{spring_tip}</div></span><br>
-            <span class="hover-tip">{catalyst}<div class="tip-box">{news_tip}</div></span><br>
-            {_safe_html(row.get('Confidence', ''))}
+            {hover_item('Price', f'{current_price} → {potential_price}', price_tip)}
+            {hover_item('RSI', f'{rsi} · {clean_label(opportunity)}', rsi_tip, dot=True)}
+            {hover_item('Potential', f'+{avg_max}% in {avg_days}d avg', bounce_tip)}
+            {hover_item('History', history, history_tip)}
+            {hover_item('Attention', clean_label(attention), attention_tip, dot=True)}
+            {hover_item('Spring', f'{spring_tf} · {clean_label(spring)}', spring_score_tip, dot=True)}
+            {hover_item('News', clean_label(catalyst), news_tip, dot=True)}
+            {hover_item('Confidence', clean_label(confidence), confidence_tip, dot=True)}
         </div>
     </div>
     """
@@ -1221,7 +1336,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V5.5")
+st.markdown("# 🔥 SwingIt V5.6")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
@@ -1303,10 +1418,12 @@ if not results:
     st.stop()
 
 # Compact model output table.
+company_lookup = get_company_lookup(active_universe)
 rows = []
 for r in results:
     rows.append({
         "Ticker": r["ticker"],
+        "Company": company_lookup.get(r["ticker"], ""),
         "Swing Score": r["swing_score"],
         "Setup Quality": r.get("setup_quality"),
         "RSI": r["current_rsi"],
