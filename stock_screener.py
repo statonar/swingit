@@ -1,5 +1,5 @@
 """
-SwingIt V10.4 — Universe Accuracy + Profile Defaults + Morning Report
+SwingIt V10.5 — Universe Accuracy + Profile Defaults + Morning Report
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V10.4",
+    page_title="SwingIt V10.5",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -270,21 +270,16 @@ if "last_morning_report" not in st.session_state:
 custom_input = ""
 csv_uploaded = None
 
-PROFILE_OPTIONS = ["Amber", "Adam", "Shared"]
+APP_DATA_DIR = os.path.join("swingit_data")
+os.makedirs(APP_DATA_DIR, exist_ok=True)
 
-def _profile_slug(name: str) -> str:
-    return re.sub(r"[^a-z0-9_-]+", "_", str(name).strip().lower()).strip("_") or "default"
-
-PROFILE_ROOT_DIR = os.path.join("swingit_data", "profiles")
-os.makedirs(PROFILE_ROOT_DIR, exist_ok=True)
-
-PROFILE_DEFAULT_SETTINGS = {
+APP_DEFAULT_SETTINGS = {
     "default_universe": "⭐ Favorites",
     "default_view_by": "🎯 8% Target Hunter",
     "default_candidate_gate": "Balanced",
 }
 
-PROFILE_VIEW_BY_OPTIONS = [
+APP_VIEW_BY_OPTIONS = [
     "🎯 8% Target Hunter",
     "⚡ Ready Now",
     "🧠 Highest Confidence",
@@ -292,22 +287,15 @@ PROFILE_VIEW_BY_OPTIONS = [
     "😱 Overreaction",
 ]
 
-PROFILE_CANDIDATE_GATE_OPTIONS = ["Balanced", "Strict", "Loose"]
+APP_CANDIDATE_GATE_OPTIONS = ["Balanced", "Strict", "Loose"]
+APP_SETTINGS_FILE = os.path.join(APP_DATA_DIR, "profile_settings.json")
+FAVORITES_CSV_FILE = "favorites.csv"
 
-def _profile_dir_for(name: str) -> str:
-    path = os.path.join(PROFILE_ROOT_DIR, _profile_slug(name))
-    os.makedirs(path, exist_ok=True)
-    return path
-
-def _profile_settings_file_for(name: str) -> str:
-    return os.path.join(_profile_dir_for(name), "profile_settings.json")
-
-def load_profile_settings(name: str) -> dict:
-    settings = PROFILE_DEFAULT_SETTINGS.copy()
-    path = _profile_settings_file_for(name)
+def load_app_settings() -> dict:
+    settings = APP_DEFAULT_SETTINGS.copy()
     try:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
+        if os.path.exists(APP_SETTINGS_FILE):
+            with open(APP_SETTINGS_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
                 settings.update({k: v for k, v in saved.items() if k in settings})
@@ -315,20 +303,15 @@ def load_profile_settings(name: str) -> dict:
         pass
     return settings
 
-def save_profile_settings(name: str, settings: dict) -> None:
-    path = _profile_settings_file_for(name)
-    clean = PROFILE_DEFAULT_SETTINGS.copy()
+def save_app_settings(settings: dict) -> None:
+    clean = APP_DEFAULT_SETTINGS.copy()
     clean.update({k: v for k, v in settings.items() if k in clean})
-    with open(path, "w", encoding="utf-8") as f:
+    os.makedirs(APP_DATA_DIR, exist_ok=True)
+    with open(APP_SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(clean, f, indent=2)
 
 if "force_profile_defaults" not in st.session_state:
     st.session_state.force_profile_defaults = True
-
-if "active_profile_name" not in st.session_state:
-    st.session_state.active_profile_name = "Amber"
-if "last_profile_name" not in st.session_state:
-    st.session_state.last_profile_name = st.session_state.active_profile_name
 
 UNIVERSE_OPTIONS = [
     "⭐ SwingIt Elite (Recommended)",
@@ -372,49 +355,31 @@ UNIVERSE_HINTS = {
     "Custom list": "Paste tickers manually",
 }
 
+current_profile_settings = load_app_settings()
+if st.session_state.get("force_profile_defaults", False):
+    st.session_state.top_universe = current_profile_settings.get("default_universe", APP_DEFAULT_SETTINGS["default_universe"])
+    st.session_state.ranking_mode_selector = current_profile_settings.get("default_view_by", APP_DEFAULT_SETTINGS["default_view_by"])
+    st.session_state.candidate_gate_mode = current_profile_settings.get("default_candidate_gate", APP_DEFAULT_SETTINGS["default_candidate_gate"])
+    st.session_state.force_profile_defaults = False
+else:
+    st.session_state.setdefault("top_universe", current_profile_settings.get("default_universe", APP_DEFAULT_SETTINGS["default_universe"]))
+    st.session_state.setdefault("ranking_mode_selector", current_profile_settings.get("default_view_by", APP_DEFAULT_SETTINGS["default_view_by"]))
+    st.session_state.setdefault("candidate_gate_mode", current_profile_settings.get("default_candidate_gate", APP_DEFAULT_SETTINGS["default_candidate_gate"]))
+
 with st.container(border=True):
-    top_title_col, top_profile_col, top_universe_col, top_profile_settings_col, top_model_col, top_run_col = st.columns(
-        [1.05, 0.75, 1.9, 1.25, 1.45, 1.15],
+    top_title_col, top_universe_col, top_profile_settings_col, top_model_col, top_run_col = st.columns(
+        [1.2, 2.15, 1.35, 1.55, 1.15],
         vertical_alignment="center",
     )
 
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V10.4</div>
+            <div class="terminal-title">🔥 SwingIt V10.5</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
         )
-
-    with top_profile_col:
-        st.markdown("<div class='toolbar-label'>Profile</div>", unsafe_allow_html=True)
-        active_profile = st.selectbox(
-            "Profile",
-            PROFILE_OPTIONS,
-            index=PROFILE_OPTIONS.index(st.session_state.active_profile_name) if st.session_state.active_profile_name in PROFILE_OPTIONS else 0,
-            label_visibility="collapsed",
-            help="Separate Favorites, Morning Reports, saved settings, and defaults for each person.",
-            key="top_profile",
-        )
-
-        profile_changed_now = active_profile != st.session_state.active_profile_name
-        st.session_state.active_profile_name = active_profile
-        if profile_changed_now:
-            st.session_state.force_profile_defaults = True
-
-        current_profile_settings = load_profile_settings(active_profile)
-        if st.session_state.get("force_profile_defaults", False):
-            st.session_state.top_universe = current_profile_settings.get("default_universe", PROFILE_DEFAULT_SETTINGS["default_universe"])
-            st.session_state.ranking_mode_selector = current_profile_settings.get("default_view_by", PROFILE_DEFAULT_SETTINGS["default_view_by"])
-            st.session_state.candidate_gate_mode = current_profile_settings.get("default_candidate_gate", PROFILE_DEFAULT_SETTINGS["default_candidate_gate"])
-            st.session_state.force_profile_defaults = False
-        else:
-            st.session_state.setdefault("top_universe", current_profile_settings.get("default_universe", PROFILE_DEFAULT_SETTINGS["default_universe"]))
-            st.session_state.setdefault("ranking_mode_selector", current_profile_settings.get("default_view_by", PROFILE_DEFAULT_SETTINGS["default_view_by"]))
-            st.session_state.setdefault("candidate_gate_mode", current_profile_settings.get("default_candidate_gate", PROFILE_DEFAULT_SETTINGS["default_candidate_gate"]))
-
-        st.markdown("<div class='toolbar-help'>Personal favorites + reports</div>", unsafe_allow_html=True)
 
     with top_universe_col:
         st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
@@ -431,36 +396,36 @@ with st.container(border=True):
     with top_profile_settings_col:
         st.markdown("<div class='toolbar-label'>Profile Settings</div>", unsafe_allow_html=True)
         with st.popover("👤 Defaults", use_container_width=True):
-            st.caption(f"Saved defaults for {active_profile}. These load automatically when this profile is selected.")
+            st.caption("Saved app defaults. These load automatically when SwingIt starts.")
             ps_universe = st.selectbox(
                 "Default universe",
                 UNIVERSE_OPTIONS,
-                index=UNIVERSE_OPTIONS.index(current_profile_settings.get("default_universe", PROFILE_DEFAULT_SETTINGS["default_universe"])) if current_profile_settings.get("default_universe") in UNIVERSE_OPTIONS else 0,
-                help="Which universe should appear first for this profile?",
-                key=f"profile_default_universe_{_profile_slug(active_profile)}",
+                index=UNIVERSE_OPTIONS.index(current_profile_settings.get("default_universe", APP_DEFAULT_SETTINGS["default_universe"])) if current_profile_settings.get("default_universe") in UNIVERSE_OPTIONS else 0,
+                help="Which universe should appear first?",
+                key="profile_default_universe",
             )
             ps_view_by = st.selectbox(
                 "Default View By",
-                PROFILE_VIEW_BY_OPTIONS,
-                index=PROFILE_VIEW_BY_OPTIONS.index(current_profile_settings.get("default_view_by", PROFILE_DEFAULT_SETTINGS["default_view_by"])) if current_profile_settings.get("default_view_by") in PROFILE_VIEW_BY_OPTIONS else 0,
-                help="Which ranking lens should this profile start with?",
-                key=f"profile_default_view_by_{_profile_slug(active_profile)}",
+                APP_VIEW_BY_OPTIONS,
+                index=APP_VIEW_BY_OPTIONS.index(current_profile_settings.get("default_view_by", APP_DEFAULT_SETTINGS["default_view_by"])) if current_profile_settings.get("default_view_by") in APP_VIEW_BY_OPTIONS else 0,
+                help="Which ranking lens should SwingIt start with?",
+                key="profile_default_view_by",
             )
             ps_gate = st.selectbox(
                 "Default Candidate Quality Gate",
-                PROFILE_CANDIDATE_GATE_OPTIONS,
-                index=PROFILE_CANDIDATE_GATE_OPTIONS.index(current_profile_settings.get("default_candidate_gate", PROFILE_DEFAULT_SETTINGS["default_candidate_gate"])) if current_profile_settings.get("default_candidate_gate") in PROFILE_CANDIDATE_GATE_OPTIONS else 0,
+                APP_CANDIDATE_GATE_OPTIONS,
+                index=APP_CANDIDATE_GATE_OPTIONS.index(current_profile_settings.get("default_candidate_gate", APP_DEFAULT_SETTINGS["default_candidate_gate"])) if current_profile_settings.get("default_candidate_gate") in APP_CANDIDATE_GATE_OPTIONS else 0,
                 help="How strict should the Top Qualified Opportunities cards be by default?",
-                key=f"profile_default_gate_{_profile_slug(active_profile)}",
+                key="profile_default_gate",
             )
-            if st.button("💾 Save profile defaults", use_container_width=True, key=f"save_profile_defaults_{_profile_slug(active_profile)}"):
-                save_profile_settings(active_profile, {
+            if st.button("💾 Save defaults", use_container_width=True, key="save_profile_defaults"):
+                save_app_settings({
                     "default_universe": ps_universe,
                     "default_view_by": ps_view_by,
                     "default_candidate_gate": ps_gate,
                 })
                 st.session_state.force_profile_defaults = True
-                st.success("Saved. Reloading this profile with the new defaults…")
+                st.success("Saved. Reloading with the new defaults…")
                 st.rerun()
         default_summary = f"{current_profile_settings.get('default_view_by', '🎯 8% Target Hunter').split(' ', 1)[0]} · {current_profile_settings.get('default_candidate_gate', 'Balanced')}"
         st.markdown(f"<div class='toolbar-help'>Defaults: {html.escape(default_summary)}</div>", unsafe_allow_html=True)
@@ -523,18 +488,9 @@ elif universe == "📂 CSV upload":
         key="top_csv_upload",
     )
 
-# If the profile changes, clear displayed scan results so Amber and Adam don't accidentally
-# see each other's Favorites scan/Morning Report output.
-if st.session_state.last_profile_name != st.session_state.active_profile_name:
-    st.session_state.scan_results = None
-    st.session_state.scan_meta = None
-    st.session_state.last_morning_report = None
-    st.session_state.leaderboard_filter = "All"
-    st.session_state.last_profile_name = st.session_state.active_profile_name
-
-ACTIVE_PROFILE = st.session_state.active_profile_name
-PROFILE_SLUG = _profile_slug(ACTIVE_PROFILE)
-PROFILE_DIR = os.path.join("swingit_data", "profiles", PROFILE_SLUG)
+# Single-user mode: Favorites and Morning Report storage are app-level.
+ACTIVE_PROFILE = "Amber"
+PROFILE_DIR = APP_DATA_DIR
 os.makedirs(PROFILE_DIR, exist_ok=True)
 
 st.markdown("---")
@@ -543,7 +499,7 @@ st.markdown("---")
 # ──────────────────────────────────────────────────────────────────────────────
 # Favorites + uploaded universe helpers
 # ──────────────────────────────────────────────────────────────────────────────
-FAVORITES_FILE = os.path.join(PROFILE_DIR, "favorites.json")
+FAVORITES_FILE = FAVORITES_CSV_FILE
 
 
 def _normalize_ticker(ticker: str) -> str:
@@ -551,14 +507,20 @@ def _normalize_ticker(ticker: str) -> str:
 
 
 def _favorites_state_key() -> str:
-    return f"favorites_{PROFILE_SLUG}"
+    return "favorites_single_user"
+
+
+def favorites_to_csv_text(tickers: list[str]) -> str:
+    clean = dedupe([_normalize_ticker(t) for t in tickers if str(t).strip()])
+    return "Ticker\n" + "\n".join(clean) + ("\n" if clean else "")
 
 
 def load_favorites() -> list[str]:
-    """Load profile-specific favorites.
+    """Load Favorites from a simple repo CSV file named favorites.csv.
 
-    Important: Favorites must not rely only on a cached universe payload. Streamlit reruns
-    the app constantly, so we keep a session-state copy and mirror it to disk when possible.
+    For permanent Favorites on Streamlit Cloud, keep `favorites.csv` committed in
+    your GitHub repo. In-app add/remove works during the session and can write to
+    the app filesystem when available, but GitHub remains the permanent source.
     """
     key = _favorites_state_key()
     if key in st.session_state:
@@ -567,13 +529,18 @@ def load_favorites() -> list[str]:
     favs = []
     try:
         if os.path.exists(FAVORITES_FILE):
-            with open(FAVORITES_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                favs = dedupe([_normalize_ticker(t) for t in data if str(t).strip()])
+            df_fav = pd.read_csv(FAVORITES_FILE)
+            if not df_fav.empty:
+                if "Ticker" in df_fav.columns:
+                    favs = df_fav["Ticker"].tolist()
+                elif "Symbol" in df_fav.columns:
+                    favs = df_fav["Symbol"].tolist()
+                else:
+                    favs = df_fav.iloc[:, 0].tolist()
     except Exception:
         favs = []
 
+    favs = dedupe([_normalize_ticker(t) for t in favs if str(t).strip()])
     st.session_state[key] = favs
     return favs
 
@@ -582,13 +549,10 @@ def save_favorites(tickers: list[str]) -> None:
     clean = dedupe([_normalize_ticker(t) for t in tickers if str(t).strip()])
     st.session_state[_favorites_state_key()] = clean
     try:
-        os.makedirs(PROFILE_DIR, exist_ok=True)
         with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
-            json.dump(clean, f, indent=2)
+            f.write(favorites_to_csv_text(clean))
     except Exception:
-        st.warning("Could not save favorites to disk in this environment. They will still work during this session.")
-
-
+        st.warning("Could not write favorites.csv in this environment. Download the updated CSV below and commit it to GitHub.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -797,8 +761,8 @@ def _report_line(item: dict, category: str) -> str:
 
 def render_morning_report(report: dict, favorites_count: int, previous_snapshot: dict | None = None):
     previous_time = (previous_snapshot or {}).get("saved_at")
-    st.markdown(f"## ☕🦜 Morning Report for {html.escape(ACTIVE_PROFILE)}")
-    st.caption("Profile-specific Favorites briefing: what changed, what is actionable, and what should be ignored for now.")
+    st.markdown("## ☕🦜 Morning Report")
+    st.caption("Favorites briefing: what changed, what is actionable, and what should be ignored for now.")
     counts = {k: len(v) for k, v in (report or {}).items()}
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Favorites scanned", favorites_count)
@@ -1383,7 +1347,7 @@ def get_universe_payload_static(selected_universe: str, custom_text: str = ""):
 def get_universe_payload(selected_universe: str, custom_text: str = ""):
     """Returns (tickers, source_map) for the selected universe.
 
-    Favorites are loaded live for the active profile so newly added favorites are
+    Favorites are loaded live so newly added favorites are
     immediately scan-able and do not get trapped behind Streamlit's cache.
     """
     if selected_universe == "⭐ Favorites":
@@ -3288,7 +3252,7 @@ if st.session_state.scan_results is None and not run:
     with st.container(border=True):
         st.markdown("### ☕🦜 Morning Report")
         st.markdown(
-            f"Your Zazu-style Favorites briefing for {html.escape(ACTIVE_PROFILE)}: overreaction panic alerts, ready-now candidates, new turns, and red flags."
+            "Your Zazu-style Favorites briefing: overreaction panic alerts, ready-now candidates, new turns, and red flags."
         )
         col_a, col_b = st.columns([1, 2])
         with col_a:
@@ -3296,9 +3260,9 @@ if st.session_state.scan_results is None and not run:
                 run_morning_report = True
         with col_b:
             if fav_count == 0:
-                st.warning(f"Add Favorites for {ACTIVE_PROFILE} first, then Morning Report can watch them for changes.")
+                st.warning("Add Favorites first, then Morning Report can watch them for changes.")
             else:
-                st.caption(f"Will scan {fav_count} {ACTIVE_PROFILE} Favorites and compare against this profile’s last Morning Report snapshot.")
+                st.caption(f"Will scan {fav_count} Favorites and compare against the last Morning Report snapshot.")
         st.markdown("---")
         st.markdown("### 📈 Custom Scan")
         st.caption("Use the toolbar above to choose a universe, model settings, and run a normal Swing Scan.")
@@ -3323,7 +3287,7 @@ if run or run_morning_report:
 
     tickers = all_tickers
     st.session_state.scan_meta = {
-        "profile": ACTIVE_PROFILE,
+        "profile": "Single User",
         "universe": scan_universe,
         "morning_report": bool(run_morning_report),
         "previous_morning_snapshot": previous_morning_snapshot,
@@ -3338,7 +3302,7 @@ if run or run_morning_report:
     }
 
     if run_morning_report:
-        st.info(f"☕🦜 Building Morning Report for {ACTIVE_PROFILE}: scanning {len(tickers)} Favorites…")
+        st.info(f"☕🦜 Building Morning Report: scanning {len(tickers)} Favorites…")
     else:
         st.info(f"Scanning full universe: {len(tickers)} tickers from {scan_universe}…")
     progress = st.progress(0)
@@ -3670,19 +3634,12 @@ st.dataframe(
 )
 
 
-with st.expander("👤 Profile Manager", expanded=False):
-    st.caption("Profiles keep Favorites and Morning Report history separate. Use Shared for a joint/family list.")
-    st.write(f"Current profile: **{ACTIVE_PROFILE}**")
-    st.write(f"Profile data folder: `{PROFILE_DIR}`")
-    st.info("Amber and Adam can now keep separate Favorites and separate Morning Report baselines.")
-
-
-with st.expander(f"⭐ Favorites Manager — {ACTIVE_PROFILE}", expanded=False):
+with st.expander("⭐ Favorites Manager", expanded=False):
     favs = load_favorites()
-    st.caption(f"Favorites are saved separately for {ACTIVE_PROFILE}. Choose ⭐ Favorites in the Universe menu to scan only these tickers.")
+    st.caption("Favorites are loaded from `favorites.csv`. For permanent Streamlit Cloud storage, keep that CSV committed in your GitHub repo. In-app add/remove updates this running session and writes the file when possible; use the download button to update your repo copy.")
     st.write(", ".join(favs) if favs else "No favorites saved yet.")
     add_text = st.text_input("Add tickers to Favorites", placeholder="ORCL, ADBE, META", key="favorites_add_text")
-    fav_a, fav_b, fav_c = st.columns([1, 1, 3])
+    fav_a, fav_b, fav_c = st.columns([1, 1, 2])
     with fav_a:
         if st.button("Add", key="favorites_add_button", use_container_width=True):
             raw = add_text.replace("\n", ",").replace(";", ",")
@@ -3695,6 +3652,16 @@ with st.expander(f"⭐ Favorites Manager — {ACTIVE_PROFILE}", expanded=False):
             save_favorites([])
             st.success("Favorites cleared")
             st.rerun()
+    with fav_c:
+        st.download_button(
+            "⬇ Download favorites.csv",
+            data=favorites_to_csv_text(load_favorites()),
+            file_name="favorites.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="download_favorites_csv",
+        )
+
 
 with st.expander("What the Swing Score means"):
     st.markdown(f"""
