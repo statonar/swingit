@@ -1,5 +1,5 @@
 """
-SwingIt V5.4 — RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V5.5 — RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V5.4",
+    page_title="SwingIt V5.5",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -90,14 +90,16 @@ st.markdown(
     .hot-card {
         background:var(--surface);
         border:1px solid var(--border);
-        border-radius:18px;
-        padding:18px 18px 14px 18px;
-        box-shadow:0 8px 22px rgba(15,23,42,.06);
-        min-height:205px;
+        border-radius:16px;
+        padding:12px 13px 10px 13px;
+        box-shadow:0 5px 14px rgba(15,23,42,.05);
+        min-height:178px;
+        margin-bottom:10px;
     }
-    .hot-title { font-size:1.05rem; font-weight:900; margin-bottom:3px; }
-    .hot-score { font-size:2.0rem; font-weight:950; color:var(--accent); line-height:1.1; }
-    .hot-meta { color:var(--muted); font-size:.86rem; margin-top:8px; line-height:1.45; }
+    .hot-title { font-size:.95rem; font-weight:900; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .hot-score { font-size:1.55rem; font-weight:950; color:var(--accent); line-height:1.05; }
+    .hot-meta { color:var(--muted); font-size:.74rem; margin-top:6px; line-height:1.32; }
+    .hot-setup { color:var(--muted); font-size:.74rem; margin-top:3px; }
     .hover-tip {
         position:relative;
         display:inline-block;
@@ -112,7 +114,7 @@ st.markdown(
         z-index:9999;
         left:0;
         top:125%;
-        width:310px;
+        width:285px;
         background:#111827;
         color:#f9fafb!important;
         border-radius:12px;
@@ -162,7 +164,7 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V5.4")
+    st.markdown("## 🔥 SwingIt V5.5")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -1125,13 +1127,13 @@ def hot_card(rank, row):
         <div class="hot-score hover-tip">{score}
             <div class="tip-box">{score_tip}</div>
         </div>
-        <div class="small-muted">Swing Score</div>
-        <div class="small-muted" style="margin-top:6px;"><strong>Setup Score:</strong> {setup_quality}/100</div>
+        <div class="small-muted" style="font-size:.72rem;">Swing Score</div>
+        <div class="hot-setup"><strong>Setup:</strong> {setup_quality}/100</div>
         <div class="hot-meta">
             {_safe_html(row.get('Opportunity'))}<br>
-            Current {current_price} → Swing target {potential_price}<br>
-            RSI {_safe_html(row.get('RSI'))} · Potential {_safe_html(row.get('Avg Max Bounce'))}<br>
-            Avg max in {_safe_html(row.get('Avg Days to Max'))} days · {_safe_html(row.get('History'))}<br>
+            {current_price} → {potential_price}<br>
+            RSI {_safe_html(row.get('RSI'))} · +{_safe_html(row.get('Avg Max Bounce'))}<br>
+            {_safe_html(row.get('Avg Days to Max'))}d avg · {_safe_html(row.get('History'))}<br>
             👀 {attention}<br>
             <span class="hover-tip">{spring_tf} {spring} {spring_score}/100<div class="tip-box">{spring_tip}</div></span><br>
             <span class="hover-tip">{catalyst}<div class="tip-box">{news_tip}</div></span><br>
@@ -1219,7 +1221,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V5.4")
+st.markdown("# 🔥 SwingIt V5.5")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
@@ -1398,9 +1400,9 @@ st.markdown("## 🔥 Best Swing Opportunities")
 st.caption("Top 10 from the current filter/sort view. Use the sidebar arrow to reopen filters when needed.")
 top = filtered_df.head(10)
 if not top.empty:
-    for start in range(0, len(top), 3):
-        row_slice = top.iloc[start:start + 3]
-        card_cols = st.columns(3)
+    for start in range(0, len(top), 5):
+        row_slice = top.iloc[start:start + 5]
+        card_cols = st.columns(5)
         for offset, (_, row) in enumerate(row_slice.iterrows()):
             with card_cols[offset]:
                 st.markdown(hot_card(start + offset, row), unsafe_allow_html=True)
