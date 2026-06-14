@@ -116,6 +116,15 @@ st.markdown(
 )
 
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Session state — preserves scan results when widgets rerun the app
+# ──────────────────────────────────────────────────────────────────────────────
+if "scan_results" not in st.session_state:
+    st.session_state.scan_results = None
+if "scan_meta" not in st.session_state:
+    st.session_state.scan_meta = None
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Sidebar — intentionally pared back
 # ──────────────────────────────────────────────────────────────────────────────
@@ -723,48 +732,81 @@ def mini_chart(data):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Main UI
+# Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("# 🔥 SwingIt V3.2")
-st.markdown(
-    f"<div class='small-muted'>Ranking {universe} for 1–4 week RSI rebound swing candidates · Target RSI {rsi_target} · Max bounce window {bounce_window} trading days</div>",
-    unsafe_allow_html=True,
-)
-st.divider()
 
-if not run:
+# When the button is clicked, run the scan once and store the result.
+if run:
+    all_tickers = get_universe_tickers(universe, custom_input)
+    if not all_tickers:
+        st.warning("No tickers found. Check your custom list or choose another universe.")
+        st.stop()
+
+    tickers = all_tickers[:max_results]
+    st.session_state.scan_meta = {
+        "universe": universe,
+        "max_results": max_results,
+        "rsi_target": rsi_target,
+        "bounce_window": bounce_window,
+        "include_news": include_news,
+        "tickers_scanned": len(tickers),
+        "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
+    }
+
+    st.info(f"Scanning {len(tickers)} tickers from {universe}…")
+    progress = st.progress(0)
+    status = st.empty()
+
+    results = []
+    for i, ticker in enumerate(tickers):
+        status.caption(f"Checking {ticker}…")
+        candidate = compute_candidate(ticker, rsi_target, bounce_window, include_news)
+        if candidate:
+            results.append(candidate)
+        progress.progress((i + 1) / len(tickers))
+
+    progress.empty()
+    status.empty()
+    st.session_state.scan_results = results
+
+# If no scan has been run yet, show landing state.
+if st.session_state.scan_results is None:
+    st.markdown(
+        f"<div class='small-muted'>Choose a universe, then run the scan to rank 1–4 week RSI rebound swing candidates.</div>",
+        unsafe_allow_html=True,
+    )
+    st.divider()
     st.markdown(
         """
         <div style="background:#ffffff;border:1px solid #d8dee6;border-radius:18px;padding:36px;text-align:center;">
             <div style="font-size:3rem;">📈</div>
             <h3>Run the scan to build today's rebound watchlist.</h3>
-            <p class="small-muted">This version removes the extra filters and ranks stocks by current RSI opportunity + historical rebound behavior.</p>
+            <p class="small-muted">This version keeps your results alive when you sort, change ticker detail, or interact with the page.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.stop()
 
-all_tickers = get_universe_tickers(universe, custom_input)
-if not all_tickers:
-    st.warning("No tickers found. Check your custom list or choose another universe.")
-    st.stop()
+results = st.session_state.scan_results or []
+meta = st.session_state.scan_meta or {
+    "universe": universe,
+    "rsi_target": rsi_target,
+    "bounce_window": bounce_window,
+    "tickers_scanned": 0,
+    "run_date": "current session",
+}
+active_universe = meta.get("universe", universe)
+active_rsi_target = meta.get("rsi_target", rsi_target)
+active_bounce_window = meta.get("bounce_window", bounce_window)
+active_tickers_scanned = meta.get("tickers_scanned", 0)
 
-tickers = all_tickers[:max_results]
-st.info(f"Scanning {len(tickers)} tickers from {universe}…")
-progress = st.progress(0)
-status = st.empty()
-
-results = []
-for i, ticker in enumerate(tickers):
-    status.caption(f"Checking {ticker}…")
-    candidate = compute_candidate(ticker, rsi_target, bounce_window, include_news)
-    if candidate:
-        results.append(candidate)
-    progress.progress((i + 1) / len(tickers))
-
-progress.empty()
-status.empty()
+st.markdown(
+    f"<div class='small-muted'>Latest scan: {active_universe} · Target RSI {active_rsi_target} · Max bounce window {active_bounce_window} trading days · {meta.get('run_date', '')}</div>",
+    unsafe_allow_html=True,
+)
+st.divider()
 
 if not results:
     st.warning("No usable price/RSI data came back. Try a smaller custom list or rerun in a minute.")
@@ -782,8 +824,8 @@ for r in results:
         "Potential Swing Price": r.get("potential_sell_price"),
         "Avg Max Bounce": r.get("avg_max_bounce_pct"),
         "Avg Days to Max": r.get("avg_days_to_max_bounce"),
-        f"Avg Gain to RSI {rsi_target}": r.get("avg_gain_to_target_pct"),
-        f"Avg Days to RSI {rsi_target}": r.get("avg_days_to_target"),
+        f"Avg Gain to RSI {active_rsi_target}": r.get("avg_gain_to_target_pct"),
+        f"Avg Days to RSI {active_rsi_target}": r.get("avg_days_to_target"),
         "History": f"{r.get('event_count', 0)} events",
         "Confidence": r.get("confidence_label"),
         "Confidence Score": r.get("confidence_score"),
@@ -801,7 +843,7 @@ df_sorted = df.sort_values(["Swing Score", "RSI"], ascending=[False, True], na_p
 
 # Top summary metrics
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Scanned", len(tickers))
+c1.metric("Scanned", active_tickers_scanned or len(results))
 c2.metric("Usable results", len(df_sorted))
 c3.metric("RSI < 40 now", int((pd.to_numeric(df_sorted["RSI"], errors="coerce") < 40).sum()))
 c4.metric("High-confidence patterns", int(df_sorted["Confidence"].astype(str).str.contains("High", na=False).sum()))
@@ -819,11 +861,17 @@ st.markdown("## Watchlist Leaderboard")
 
 sort_a, sort_b, sort_c = st.columns([1.4, 1, 1])
 with sort_a:
-    sort_by = st.selectbox("Sort by", df_sorted.columns.tolist(), index=df_sorted.columns.tolist().index("Swing Score"))
+    default_sort = "Swing Score" if "Swing Score" in df_sorted.columns else df_sorted.columns[0]
+    sort_by = st.selectbox(
+        "Sort by",
+        df_sorted.columns.tolist(),
+        index=df_sorted.columns.tolist().index(default_sort),
+        key="leaderboard_sort_by",
+    )
 with sort_b:
-    sort_direction = st.selectbox("Direction", ["Descending", "Ascending"], index=0)
+    sort_direction = st.selectbox("Direction", ["Descending", "Ascending"], index=0, key="leaderboard_sort_direction")
 with sort_c:
-    view_mode = st.selectbox("View", ["Compact", "Research"], index=0)
+    view_mode = st.selectbox("View", ["Compact", "Research"], index=0, key="leaderboard_view_mode")
 
 ascending = sort_direction == "Ascending"
 display = df_sorted.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
@@ -832,7 +880,7 @@ compact_cols = [
     "Ticker", "Swing Score", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "News"
 ]
 research_cols = compact_cols + [
-    "Headline", f"Avg Gain to RSI {rsi_target}", f"Avg Days to RSI {rsi_target}", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "Headline", f"Avg Gain to RSI {active_rsi_target}", f"Avg Days to RSI {active_rsi_target}", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -848,7 +896,7 @@ st.dataframe(
         "Price": st.column_config.NumberColumn(format="$%.2f"),
         "Potential Swing Price": st.column_config.NumberColumn(format="$%.2f"),
         "Avg Max Bounce": st.column_config.NumberColumn(format="%.1f%%"),
-        f"Avg Gain to RSI {rsi_target}": st.column_config.NumberColumn(format="%.1f%%"),
+        f"Avg Gain to RSI {active_rsi_target}": st.column_config.NumberColumn(format="%.1f%%"),
         "Avg Drawdown After Low": st.column_config.NumberColumn(format="%.1f%%"),
     },
 )
@@ -859,7 +907,7 @@ with st.expander("What the Swing Score means"):
 
     **1. Current opportunity score** — how close the stock is to an actionable RSI rebound zone right now. RSI under 30 scores highest; RSI 30–40 is still watchable; RSI above 50 scores low because it may have already recovered.
 
-    **2. Historical rebound score** — what happened the last times this stock fell below RSI 30. It uses recovery frequency to RSI {rsi_target}, average gain to RSI {rsi_target}, average max bounce within {bounce_window} trading days, speed of recovery, days to max bounce, oversold depth, sample size, and a drawdown penalty.
+    **2. Historical rebound score** — what happened the last times this stock fell below RSI 30. It uses recovery frequency to RSI {active_rsi_target}, average gain to RSI {active_rsi_target}, average max bounce within {active_bounce_window} trading days, speed of recovery, days to max bounce, oversold depth, sample size, and a drawdown penalty.
 
     **Panic zone** means current RSI is below 25. It is the most washed-out bucket in the model. It can be powerful, but it can also still be falling, so it should be treated as “high alert,” not an automatic buy.
 
@@ -874,7 +922,7 @@ with st.expander("What the Swing Score means"):
 
 st.divider()
 st.markdown("## Ticker Detail")
-selected = st.selectbox("Inspect ticker", display["Ticker"].tolist())
+selected = st.selectbox("Inspect ticker", display["Ticker"].tolist(), key="ticker_detail_select")
 detail = next((r for r in results if r["ticker"] == selected), None)
 
 if detail:
@@ -896,6 +944,8 @@ if detail:
     else:
         tags.append(f"<span class='tag tag-blue'>{opp}</span>")
     tags.append(f"<span class='tag tag-green'>{detail.get('event_count', 0)} historical RSI&lt;30 events</span>")
+    if detail.get("confidence_label"):
+        tags.append(f"<span class='tag tag-blue'>{detail.get('confidence_label')}</span>")
     news_label = detail.get("news_label")
     if news_label:
         tags.append(f"<span class='tag tag-blue'>{news_label}</span>")
@@ -918,6 +968,6 @@ csv = export.to_csv(index=False)
 st.download_button(
     "Download watchlist CSV",
     data=csv,
-    file_name=f"swingit_v3_{datetime.date.today()}.csv",
+    file_name=f"swingit_v3_2_{datetime.date.today()}.csv",
     mime="text/csv",
 )
