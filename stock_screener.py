@@ -1,5 +1,5 @@
 """
-SwingIt V5.1 — RSI Panic + Catalyst + Multi-Timeframe TTM Spring Engine
+SwingIt V5.2.2 — RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V5.1",
+    page_title="SwingIt V5.2.2",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -160,7 +160,7 @@ if "scan_meta" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V5.1")
+    st.markdown("## 🔥 SwingIt V5.2.1")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -713,11 +713,14 @@ def _rolling_linreg_last(values):
 
 
 def compute_ttm_spring(df: pd.DataFrame) -> dict:
-    """Approximate TTM Squeeze status and score for daily swing timing.
+    """Approximate TTM Squeeze status and score for swing timing.
 
     Squeeze ON = Bollinger Bands are inside Keltner Channels.
     Momentum uses a common TTM-style linear-regression momentum approximation.
-    This is meant as a watchlist timing clue, not a precise Thinkorswim clone.
+
+    V5.2 improvement: direction matters. A squeeze that fires while momentum is
+    falling is labeled Fired Down instead of vague/mixed. This is meant as a
+    watchlist timing clue, not a precise Thinkorswim clone.
     """
     empty = {
         "spring_score": 0,
@@ -760,8 +763,7 @@ def compute_ttm_spring(df: pd.DataFrame) -> dict:
     upper_kc = kc_mid + kc_mult * atr
     lower_kc = kc_mid - kc_mult * atr
 
-    squeeze_on = (lower_bb > lower_kc) & (upper_bb < upper_kc)
-    squeeze_on = squeeze_on.fillna(False)
+    squeeze_on = ((lower_bb > lower_kc) & (upper_bb < upper_kc)).fillna(False)
 
     highest_high = high.rolling(length).max()
     lowest_low = low.rolling(length).min()
@@ -801,78 +803,78 @@ def compute_ttm_spring(df: pd.DataFrame) -> dict:
     one_bar_change = mom_now - mom_prev
 
     improving = slope > 0 and one_bar_change >= 0
-    fading_down = slope > 0 and mom_now < 0
     worsening = slope < 0 and one_bar_change < 0
+    negative = mom_now < 0
+    positive = mom_now >= 0
 
-    if improving and mom_now < 0:
+    if improving and negative:
         trend = "🟢 Selling fading"
-    elif improving and mom_now >= 0:
+    elif improving and positive:
         trend = "🟢 Momentum rising"
-    elif worsening and mom_now < 0:
-        trend = "🔴 Pressure building"
-    elif worsening:
-        trend = "🟡 Cooling"
+    elif worsening and negative:
+        trend = "🔴 Down pressure increasing"
+    elif worsening and positive:
+        trend = "🟡 Momentum cooling"
     else:
         trend = "⚪ Flat/mixed"
 
-    # 0-100 Spring Score: separate from Swing Score so it acts as timing context.
-    if current_squeeze:
-        squeeze_component = 30
-    elif recently_fired:
-        squeeze_component = 18
-    else:
-        squeeze_component = 0
-
-    if slope >= 1.0:
-        momentum_component = 40
-    elif slope >= 0.45:
-        momentum_component = 32
-    elif slope > 0:
-        momentum_component = 22
-    elif not worsening:
-        momentum_component = 10
-    else:
-        momentum_component = 0
-
-    abs_mom = abs(mom_now)
-    if mom_now < 0 and abs_mom <= 1.0:
-        zero_component = 20          # sellers fading and close to zero line
-    elif mom_now < 0 and abs_mom <= 2.0:
-        zero_component = 14
-    elif mom_now >= 0 and abs_mom <= 2.0:
-        zero_component = 16          # fired / early positive
-    elif mom_now >= 0:
-        zero_component = 10          # already running
-    else:
-        zero_component = 5           # deeply negative
-
-    duration_component = clamp((min(squeeze_bars, 12) / 12) * 10)
-    spring_score = int(round(clamp(squeeze_component + momentum_component + zero_component + duration_component)))
-
-    if current_squeeze and fading_down and spring_score >= 70:
-        label = "🟡 Loaded spring"
+    # V5.2 directional spring states.
+    if recently_fired and positive and improving:
+        label = "🟢 Fired Up"
+        spring_score = 95
+        state_note = "Squeeze released upward; momentum is positive and rising."
+    elif current_squeeze and negative and improving:
+        label = "🟡 Loaded & Improving"
+        spring_score = 90
+        state_note = "Squeeze is still on while negative momentum is improving toward zero."
+    elif (not current_squeeze) and (not recently_fired) and negative and improving:
+        label = "🔵 Early Turn"
+        spring_score = 75
+        state_note = "No active squeeze, but negative momentum is improving."
+    elif current_squeeze and worsening:
+        label = "🟠 Loaded but Weakening"
+        spring_score = 25
+        state_note = "Squeeze is on, but momentum is worsening."
+    elif recently_fired and negative and worsening:
+        label = "🔴 Fired Down"
+        spring_score = 10
+        state_note = "Squeeze released downward; sellers are accelerating."
+    elif negative and worsening:
+        label = "⚫ Accelerating Down"
+        spring_score = 0
+        state_note = "Negative momentum is expanding lower."
+    elif recently_fired and positive:
+        label = "🟢 Fired Up"
+        spring_score = 85
+        state_note = "Squeeze recently released and momentum is positive."
     elif current_squeeze:
-        label = "🌀 Squeeze on"
-    elif recently_fired and improving:
-        label = "🟢 Fired upward"
-    elif recently_fired:
-        label = "🟡 Fired/mixed"
-    elif worsening and mom_now < 0:
-        label = "🔴 Falling"
+        label = "🌀 Squeeze On"
+        spring_score = 55
+        state_note = "Squeeze is on, but direction is not clean yet."
     elif improving:
         label = "👀 Improving"
+        spring_score = 60
+        state_note = "Momentum is improving, but there is no active/recent squeeze."
     else:
-        label = "⚪ No squeeze"
+        label = "⚪ Neutral"
+        spring_score = 50
+        state_note = "No strong spring signal right now."
+
+    # Small duration bonus/penalty nuance for active/recent squeeze states.
+    if current_squeeze or recently_fired:
+        duration_bonus = int(round(clamp((min(squeeze_bars, 12) / 12) * 5)))
+        if spring_score >= 50:
+            spring_score = int(round(clamp(spring_score + duration_bonus)))
 
     mom_3bar = " → ".join(f"{v:.2f}" for v in valid_mom.tail(3).tolist())
     reason = (
-        f"Squeeze {'ON' if current_squeeze else 'OFF'}"
+        f"{state_note} Squeeze {'ON' if current_squeeze else 'OFF'}"
         f"{' · recently fired' if recently_fired else ''} · "
         f"{squeeze_bars} squeeze bars · momentum {mom_3bar} · {trend}"
     )
 
     return {
-        "spring_score": spring_score,
+        "spring_score": int(round(clamp(spring_score))),
         "spring_label": label,
         "spring_reason": reason,
         "squeeze_on": current_squeeze,
@@ -937,12 +939,21 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "news_tone": "Off",
         }
         catalyst_score = news.get("catalyst_score", 0)
-        volume_score = 100 if (volume_ratio or 0) >= 2.5 else 70 if (volume_ratio or 0) >= 1.5 else 40 if (volume_ratio or 0) >= 1.1 else 0
+        attention_score = _volume_score_from_ratio(volume_ratio)
+
+        # Swing Score = historical rebound candidate quality.
+        # Setup Quality = right-now attention/timing quality.
         swing_score = int(round(clamp(
-            0.40 * history_score +
-            0.32 * opp_score +
-            0.18 * catalyst_score +
-            0.10 * volume_score
+            0.46 * history_score +
+            0.34 * opp_score +
+            0.14 * catalyst_score +
+            0.06 * attention_score
+        )))
+        setup_quality = int(round(clamp(
+            0.25 * opp_score +
+            0.25 * catalyst_score +
+            0.25 * spring.get("spring_score", 0) +
+            0.25 * attention_score
         )))
 
         # Momentum proximity flags for watchlist use, not entry signals.
@@ -962,6 +973,9 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "avg_vol_20d": int(avg_vol_20d) if avg_vol_20d else None,
             "current_volume": int(current_volume) if current_volume else None,
             "volume_ratio": round(float(volume_ratio), 2) if volume_ratio is not None else None,
+            "attention_score": int(round(attention_score)),
+            "attention_label": attention_label_from_ratio(volume_ratio),
+            "setup_quality": setup_quality,
             "spring_timeframe": spring_tf,
             "spring_df": spring_df,
             "spring_score": spring.get("spring_score", 0),
@@ -1038,10 +1052,25 @@ def _volume_score_from_ratio(volume_ratio):
     return 0
 
 
+def attention_label_from_ratio(volume_ratio):
+    vr = volume_ratio or 0
+    if vr >= 3.0:
+        return f"🔥 {vr:.1f}x RVOL"
+    if vr >= 2.0:
+        return f"🟢 {vr:.1f}x RVOL"
+    if vr >= 1.1:
+        return f"🟡 {vr:.1f}x RVOL"
+    if vr > 0:
+        return f"😴 {vr:.1f}x RVOL"
+    return "⚪ RVOL n/a"
+
+
 def hot_card(rank, row):
     medal = ["🥇", "🥈", "🥉"][rank] if rank < 3 else f"#{rank + 1}"
     ticker = _safe_html(row.get("Ticker"))
     score = row.get("Swing Score", "—")
+    setup_quality = row.get("Setup Quality", "—")
+    attention = _safe_html(row.get("Attention", ""))
     potential_price = row.get("Potential Swing Price", "—")
     current_price = row.get("Price", "—")
     history_score = row.get("History Score", "—")
@@ -1049,6 +1078,7 @@ def hot_card(rank, row):
     catalyst_score = row.get("Catalyst Score", "—")
     volume_ratio = row.get("Volume Ratio")
     volume_score = _volume_score_from_ratio(volume_ratio)
+    attention_score = row.get("Attention Score", volume_score)
     catalyst = _safe_html(row.get("Catalyst", ""))
     spring = _safe_html(row.get("Spring", ""))
     spring_tf = _safe_html(row.get("Spring TF", ""))
@@ -1060,11 +1090,17 @@ def hot_card(rank, row):
 
     score_tip = f"""
         <strong>Swing Score ingredients</strong><br>
-        🧠 Historical swing behavior: {history_score}/100 × 40%<br>
-        🎯 Current RSI opportunity: {opp_score}/100 × 32%<br>
-        📰 Catalyst/news: {catalyst_score}/100 × 18%<br>
-        📊 Volume confirmation: {volume_score}/100 × 10%<br><br>
-        This is a watchlist score, not an entry signal.
+        🧠 Historical swing behavior: {history_score}/100 × 46%<br>
+        🎯 Current RSI opportunity: {opp_score}/100 × 34%<br>
+        📰 Catalyst/news: {catalyst_score}/100 × 14%<br>
+        👀 Attention/RVOL: {attention_score}/100 × 6%<br><br>
+        <strong>Setup Quality</strong><br>
+        🎯 RSI opportunity: {opp_score}/100 × 25%<br>
+        📰 Catalyst/news: {catalyst_score}/100 × 25%<br>
+        🌀 Spring timing: {spring_score}/100 × 25%<br>
+        👀 Attention/RVOL: {attention_score}/100 × 25%<br><br>
+        Swing Score asks: is this historically a good rebound candidate?<br>
+        Setup Quality asks: is it worth opening in ToS right now?
     """
     news_tip = f"""
         <strong>News/catalyst read</strong><br>
@@ -1087,12 +1123,13 @@ def hot_card(rank, row):
         <div class="hot-score hover-tip">{score}
             <div class="tip-box">{score_tip}</div>
         </div>
-        <div class="small-muted">Swing Score</div>
+        <div class="small-muted">Swing Score · Setup {setup_quality}/100</div>
         <div class="hot-meta">
             {_safe_html(row.get('Opportunity'))}<br>
             Current {current_price} → Swing target {potential_price}<br>
             RSI {_safe_html(row.get('RSI'))} · Potential {_safe_html(row.get('Avg Max Bounce'))}<br>
             Avg max in {_safe_html(row.get('Avg Days to Max'))} days · {_safe_html(row.get('History'))}<br>
+            👀 {attention}<br>
             <span class="hover-tip">{spring_tf} {spring} {spring_score}/100<div class="tip-box">{spring_tip}</div></span><br>
             <span class="hover-tip">{catalyst}<div class="tip-box">{news_tip}</div></span><br>
             {_safe_html(row.get('Confidence', ''))}
@@ -1179,7 +1216,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V5.1")
+st.markdown("# 🔥 SwingIt V5.2.1")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
@@ -1265,6 +1302,7 @@ for r in results:
     rows.append({
         "Ticker": r["ticker"],
         "Swing Score": r["swing_score"],
+        "Setup Quality": r.get("setup_quality"),
         "RSI": r["current_rsi"],
         "Opportunity": r["opportunity"],
         "Price": r["price"],
@@ -1287,6 +1325,8 @@ for r in results:
         "Catalyst": r.get("catalyst_label"),
         "Catalyst Score": r.get("catalyst_score"),
         "Catalyst Reason": r.get("catalyst_reason"),
+        "Attention": r.get("attention_label"),
+        "Attention Score": r.get("attention_score"),
         "Volume Ratio": r.get("volume_ratio"),
         "Volume Score": _volume_score_from_ratio(r.get("volume_ratio")),
         "News": r.get("news_label"),
@@ -1299,7 +1339,7 @@ for r in results:
     })
 
 df = pd.DataFrame(rows)
-df_sorted = df.sort_values(["Swing Score", "RSI"], ascending=[False, True], na_position="last").reset_index(drop=True)
+df_sorted = df.sort_values(["Setup Quality", "Swing Score", "RSI"], ascending=[False, False, True], na_position="last").reset_index(drop=True)
 
 # Top summary metrics
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -1307,7 +1347,7 @@ c1.metric("Scanned", active_tickers_scanned or len(results))
 c2.metric("Usable results", len(df_sorted))
 c3.metric("RSI < 40 now", int((pd.to_numeric(df_sorted["RSI"], errors="coerce") < 40).sum()))
 c4.metric("High-confidence patterns", int(df_sorted["Confidence"].astype(str).str.contains("High", na=False).sum()))
-c5.metric("Spring ≥70", int((pd.to_numeric(df_sorted["Spring Score"], errors="coerce") >= 70).sum()))
+c5.metric("Setup ≥75", int((pd.to_numeric(df_sorted["Setup Quality"], errors="coerce") >= 75).sum()))
 
 st.markdown("## 🔥 Best Swing Opportunities")
 top = df_sorted.head(3)
@@ -1322,7 +1362,7 @@ st.markdown("## Watchlist Leaderboard")
 
 sort_a, sort_b, sort_c = st.columns([1.4, 1, 1])
 with sort_a:
-    default_sort = "Swing Score" if "Swing Score" in df_sorted.columns else df_sorted.columns[0]
+    default_sort = "Setup Quality" if "Setup Quality" in df_sorted.columns else df_sorted.columns[0]
     sort_by = st.selectbox(
         "Sort by",
         df_sorted.columns.tolist(),
@@ -1338,10 +1378,10 @@ ascending = sort_direction == "Ascending"
 display = df_sorted.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
-    "Ticker", "Swing Score", "Spring TF", "Spring Score", "Spring", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst", "Catalyst Score"
+    "Ticker", "Setup Quality", "Swing Score", "Spring TF", "Spring", "Spring Score", "Attention", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
 ]
 research_cols = compact_cols + [
-    "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -1351,8 +1391,10 @@ st.dataframe(
     hide_index=True,
     height=440,
     column_config={
+        "Setup Quality": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Swing Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Spring Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
+        "Attention Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Confidence Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Catalyst Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Volume Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
@@ -1369,7 +1411,7 @@ st.dataframe(
 
 with st.expander("What the Swing Score means"):
     st.markdown(f"""
-    **Swing Score V5** is a watchlist score: *is this stock washed out, historically bouncy, and does it have a reason to move?*
+    **Swing Score V5.2** is a historical rebound score: *is this stock washed out, historically bouncy, and does it have a reason to move?*
 
     **Spring Score** is separate. It uses the selected TTM timeframe from the sidebar (1D or 1H) and a TTM Squeeze-style calculation to ask: *is volatility compressed or recently released, and is momentum improving right now?* A high Spring Score is not a buy signal by itself, but it can help you prioritize which high Swing Score names are closest to becoming actionable.
 
@@ -1398,7 +1440,7 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V5.1 Swing Score weighting: 40% historical swing behavior, 32% current RSI opportunity, 18% catalyst/news, 10% volume confirmation. Spring Score is shown separately so timing does not overpower the historical/catalyst watchlist model.
+    Current V5.2 uses two scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (25% current RSI opportunity, 25% catalyst/news, 25% TTM Spring, 25% attention/RVOL).
 
     This is meant to produce a **watchlist**, not a buy signal. Entries should still come from price action, VWAP, volume, support/reclaim behavior, and your 5m/15m process.
     """)
@@ -1409,14 +1451,14 @@ detail = next((r for r in results if r["ticker"] == selected), None)
 
 if detail:
     a, b, c, d, e, f, g = st.columns(7)
-    a.metric("Swing Score", f"{detail['swing_score']}/100")
-    b.metric("Spring Score", f"{detail.get('spring_score', 0)}/100")
-    c.metric("RSI", detail.get("current_rsi", "—"))
-    d.metric("Price", f"${detail['price']}")
+    a.metric("Setup Quality", f"{detail.get('setup_quality', 0)}/100")
+    b.metric("Swing Score", f"{detail['swing_score']}/100")
+    c.metric("Spring Score", f"{detail.get('spring_score', 0)}/100")
+    d.metric("RSI", detail.get("current_rsi", "—"))
+    e.metric("Price", f"${detail['price']}")
     f_price = detail.get("potential_sell_price")
-    e.metric("Potential Swing Price", f"${f_price}" if f_price is not None else "—")
-    f.metric("Avg Max Bounce", format_pct(detail.get("avg_max_bounce_pct")))
-    g.metric("Avg Days to Max", detail.get("avg_days_to_max_bounce", "—"))
+    f.metric("Potential Swing Price", f"${f_price}" if f_price is not None else "—")
+    g.metric("Attention", detail.get("attention_label", "—"))
 
     tags = []
     opp = detail.get("opportunity", "")
@@ -1429,6 +1471,9 @@ if detail:
     tags.append(f"<span class='tag tag-green'>{detail.get('event_count', 0)} historical RSI&lt;30 events</span>")
     if detail.get("confidence_label"):
         tags.append(f"<span class='tag tag-blue'>{detail.get('confidence_label')}</span>")
+    tags.append(f"<span class='tag tag-blue'>Setup Quality {detail.get('setup_quality', 0)}/100</span>")
+    if detail.get("attention_label"):
+        tags.append(f"<span class='tag tag-blue'>{detail.get('attention_label')}</span>")
     if detail.get("spring_label"):
         tags.append(f"<span class='tag tag-amber'>TTM {detail.get('spring_timeframe', '1D')} · {detail.get('spring_label')} · {detail.get('spring_score', 0)}/100</span>")
     if detail.get("catalyst_label"):
