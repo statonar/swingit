@@ -1,5 +1,5 @@
 """
-SwingIt V9.3 — Trading Terminal UI, Top Bar Controls
+SwingIt V9.3.1.3.1 — Trading Terminal UI, Top Bar Controls
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V9.3",
+    page_title="SwingIt V9.3.1.3.1",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -316,7 +316,7 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V9.3</div>
+            <div class="terminal-title">🔥 SwingIt V9.3.1.3.1</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
@@ -2973,38 +2973,33 @@ rsi_under_40_count = int((pd.to_numeric(df["RSI"], errors="coerce") < 40).sum())
 high_conf_count = int(df["Confidence"].astype(str).str.contains("High", na=False).sum())
 setup_75_count = int((pd.to_numeric(df["Setup Quality"], errors="coerce") >= 75).sum())
 
-# Query-string quick filters make the summary numbers themselves clickable.
-quick_filter_param = st.query_params.get("quick_filter", None)
-if quick_filter_param:
-    quick_filter_map = {
-        "all": "All",
-        "rsi40": "RSI < 40",
-        "highconf": "High confidence",
-        "setup75": "Setup ≥75",
-    }
-    st.session_state.leaderboard_filter = quick_filter_map.get(str(quick_filter_param).lower(), st.session_state.get("leaderboard_filter", "All"))
+st.markdown("### 📊 Market Snapshot")
+st.caption("Click a number card to filter the current scan. Click the active card again to clear it.")
 
-st.markdown("### Quick filters")
+def set_quick_filter(filter_name: str):
+    current = st.session_state.get("leaderboard_filter", "All")
+    st.session_state.leaderboard_filter = "All" if current == filter_name else filter_name
 
-def quick_filter_card(label, value, query_value):
-    return f"""
-    <a class="quick-filter-card" href="?quick_filter={query_value}">
-        <div class="quick-filter-label">{_safe_html(label)}</div>
-        <div class="quick-filter-value">{_safe_html(value)}</div>
-    </a>
-    """
+
+def quick_filter_button(label: str, value, filter_name: str, key: str):
+    is_active = st.session_state.get("leaderboard_filter", "All") == filter_name
+    active_badge = "  ✓" if is_active else ""
+    button_label = f"{label}{active_badge} | {value}"
+    if st.button(button_label, use_container_width=True, key=key):
+        set_quick_filter(filter_name)
+        st.rerun()
 
 fc1, fc2, fc3, fc4, fc5 = st.columns(5)
 with fc1:
-    st.markdown(quick_filter_card("Scanned", active_tickers_scanned or len(results), "all"), unsafe_allow_html=True)
+    quick_filter_button("Scanned", active_tickers_scanned or len(results), "All", "qf_all_scanned")
 with fc2:
-    st.markdown(quick_filter_card("Usable results", len(df), "all"), unsafe_allow_html=True)
+    quick_filter_button("Usable results", len(df), "All", "qf_all_usable")
 with fc3:
-    st.markdown(quick_filter_card("RSI < 40 now", rsi_under_40_count, "rsi40"), unsafe_allow_html=True)
+    quick_filter_button("RSI < 40 now", rsi_under_40_count, "RSI < 40", "qf_rsi40")
 with fc4:
-    st.markdown(quick_filter_card("High-confidence patterns", high_conf_count, "highconf"), unsafe_allow_html=True)
+    quick_filter_button("High-confidence patterns", high_conf_count, "High confidence", "qf_highconf")
 with fc5:
-    st.markdown(quick_filter_card("Setup ≥75", setup_75_count, "setup75"), unsafe_allow_html=True)
+    quick_filter_button("Setup ≥75", setup_75_count, "Setup ≥75", "qf_setup75")
 
 st.markdown("### 🎯 View By")
 rank_col_ui, rank_help_col = st.columns([1.4, 2.6])
