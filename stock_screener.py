@@ -1,5 +1,5 @@
 """
-SwingIt V5.6 — RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V5.6.2 — RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V5.6.1",
+    page_title="SwingIt V5.6.2",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -96,6 +96,7 @@ st.markdown(
         min-height:214px;
         margin-bottom:10px;
         overflow:visible;
+        position:relative;
     }
     .hot-title { font-size:.92rem; font-weight:900; margin-bottom:8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .company-name { color:var(--muted); font-weight:700; font-size:.78rem; margin-left:4px; }
@@ -107,14 +108,15 @@ st.markdown(
     .card-item {
         display:block;
         width:100%;
-        margin:2px 0;
+        margin:4px 0;
         white-space:nowrap;
         overflow:visible;
         text-overflow:clip;
+        line-height:1.28;
     }
     .card-value {
         display:inline-block;
-        max-width:calc(100% - 78px);
+        max-width:calc(100% - 82px);
         overflow:hidden;
         text-overflow:ellipsis;
         vertical-align:bottom;
@@ -131,34 +133,33 @@ st.markdown(
         cursor:help;
     }
     .hover-tip::after {
-        content:"";
-        position:absolute;
-        left:0;
-        right:0;
-        bottom:0;
-        border-bottom:1px dotted rgba(37,99,235,.35);
+        content:none;
     }
     .hover-tip .tip-box {
         visibility:hidden;
         opacity:0;
         transition:opacity .15s ease;
         position:absolute;
-        z-index:9999;
+        z-index:99999;
         left:0;
         top:125%;
-        width:285px;
+        width:min(360px, 82vw);
+        max-width:360px;
         background:#111827;
         color:#f9fafb!important;
         border-radius:12px;
         padding:12px 14px;
         box-shadow:0 14px 35px rgba(15,23,42,.25);
         font-size:.78rem;
-        line-height:1.35;
+        line-height:1.42;
         font-weight:500;
         text-align:left;
         border:1px solid rgba(255,255,255,.12);
+        white-space:normal;
+        overflow-wrap:anywhere;
+        word-break:normal;
     }
-    .hover-tip .tip-box strong, .hover-tip .tip-box span { color:#f9fafb!important; }
+    .hover-tip .tip-box strong, .hover-tip .tip-box span { color:#f9fafb!important; white-space:normal; overflow-wrap:anywhere; }
     .hover-tip:hover .tip-box { visibility:visible; opacity:1; }
     .hot-card:nth-child(5n) .hover-tip .tip-box,
     .hot-card:nth-child(5n-1) .hover-tip .tip-box { right:0; left:auto; }
@@ -1364,7 +1365,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V5.6.1")
+st.markdown("# 🔥 SwingIt V5.6.2")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
