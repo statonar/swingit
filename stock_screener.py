@@ -1,5 +1,5 @@
 """
-SwingIt V10.1 — Profiles + Morning Report + Trading Terminal UI
+SwingIt V10.3 — Profile Defaults + Morning Report + Trading Terminal UI
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V10",
+    page_title="SwingIt V10.3",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -275,6 +275,56 @@ PROFILE_OPTIONS = ["Amber", "Adam", "Shared"]
 def _profile_slug(name: str) -> str:
     return re.sub(r"[^a-z0-9_-]+", "_", str(name).strip().lower()).strip("_") or "default"
 
+PROFILE_ROOT_DIR = os.path.join("swingit_data", "profiles")
+os.makedirs(PROFILE_ROOT_DIR, exist_ok=True)
+
+PROFILE_DEFAULT_SETTINGS = {
+    "default_universe": "⭐ Favorites",
+    "default_view_by": "🎯 8% Target Hunter",
+    "default_candidate_gate": "Balanced",
+}
+
+PROFILE_VIEW_BY_OPTIONS = [
+    "🎯 8% Target Hunter",
+    "⚡ Ready Now",
+    "🧠 Highest Confidence",
+    "🚀 Maximum Upside",
+    "😱 Overreaction",
+]
+
+PROFILE_CANDIDATE_GATE_OPTIONS = ["Balanced", "Strict", "Loose"]
+
+def _profile_dir_for(name: str) -> str:
+    path = os.path.join(PROFILE_ROOT_DIR, _profile_slug(name))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def _profile_settings_file_for(name: str) -> str:
+    return os.path.join(_profile_dir_for(name), "profile_settings.json")
+
+def load_profile_settings(name: str) -> dict:
+    settings = PROFILE_DEFAULT_SETTINGS.copy()
+    path = _profile_settings_file_for(name)
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            if isinstance(saved, dict):
+                settings.update({k: v for k, v in saved.items() if k in settings})
+    except Exception:
+        pass
+    return settings
+
+def save_profile_settings(name: str, settings: dict) -> None:
+    path = _profile_settings_file_for(name)
+    clean = PROFILE_DEFAULT_SETTINGS.copy()
+    clean.update({k: v for k, v in settings.items() if k in clean})
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(clean, f, indent=2)
+
+if "force_profile_defaults" not in st.session_state:
+    st.session_state.force_profile_defaults = True
+
 if "active_profile_name" not in st.session_state:
     st.session_state.active_profile_name = "Amber"
 if "last_profile_name" not in st.session_state:
@@ -323,15 +373,15 @@ UNIVERSE_HINTS = {
 }
 
 with st.container(border=True):
-    top_title_col, top_profile_col, top_universe_col, top_model_col, top_run_col = st.columns(
-        [1.15, 0.85, 2.1, 1.55, 1.2],
+    top_title_col, top_profile_col, top_universe_col, top_profile_settings_col, top_model_col, top_run_col = st.columns(
+        [1.05, 0.75, 1.9, 1.25, 1.45, 1.15],
         vertical_alignment="center",
     )
 
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V10.1</div>
+            <div class="terminal-title">🔥 SwingIt V10.3</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
@@ -344,10 +394,26 @@ with st.container(border=True):
             PROFILE_OPTIONS,
             index=PROFILE_OPTIONS.index(st.session_state.active_profile_name) if st.session_state.active_profile_name in PROFILE_OPTIONS else 0,
             label_visibility="collapsed",
-            help="Separate Favorites, Morning Reports, and saved settings for each person.",
+            help="Separate Favorites, Morning Reports, saved settings, and defaults for each person.",
             key="top_profile",
         )
+
+        profile_changed_now = active_profile != st.session_state.active_profile_name
         st.session_state.active_profile_name = active_profile
+        if profile_changed_now:
+            st.session_state.force_profile_defaults = True
+
+        current_profile_settings = load_profile_settings(active_profile)
+        if st.session_state.get("force_profile_defaults", False):
+            st.session_state.top_universe = current_profile_settings.get("default_universe", PROFILE_DEFAULT_SETTINGS["default_universe"])
+            st.session_state.ranking_mode_selector = current_profile_settings.get("default_view_by", PROFILE_DEFAULT_SETTINGS["default_view_by"])
+            st.session_state.candidate_gate_mode = current_profile_settings.get("default_candidate_gate", PROFILE_DEFAULT_SETTINGS["default_candidate_gate"])
+            st.session_state.force_profile_defaults = False
+        else:
+            st.session_state.setdefault("top_universe", current_profile_settings.get("default_universe", PROFILE_DEFAULT_SETTINGS["default_universe"]))
+            st.session_state.setdefault("ranking_mode_selector", current_profile_settings.get("default_view_by", PROFILE_DEFAULT_SETTINGS["default_view_by"]))
+            st.session_state.setdefault("candidate_gate_mode", current_profile_settings.get("default_candidate_gate", PROFILE_DEFAULT_SETTINGS["default_candidate_gate"]))
+
         st.markdown("<div class='toolbar-help'>Personal favorites + reports</div>", unsafe_allow_html=True)
 
     with top_universe_col:
@@ -355,12 +421,49 @@ with st.container(border=True):
         universe = st.selectbox(
             "Universe",
             UNIVERSE_OPTIONS,
-            index=0,
+            index=UNIVERSE_OPTIONS.index(st.session_state.top_universe) if st.session_state.get("top_universe") in UNIVERSE_OPTIONS else 0,
             label_visibility="collapsed",
             help="Choose the group to scan. The app scans the full selected universe by default.",
             key="top_universe",
         )
         st.markdown(f"<div class='toolbar-help'>{html.escape(UNIVERSE_HINTS.get(universe, ''))}</div>", unsafe_allow_html=True)
+
+    with top_profile_settings_col:
+        st.markdown("<div class='toolbar-label'>Profile Settings</div>", unsafe_allow_html=True)
+        with st.popover("👤 Defaults", use_container_width=True):
+            st.caption(f"Saved defaults for {active_profile}. These load automatically when this profile is selected.")
+            ps_universe = st.selectbox(
+                "Default universe",
+                UNIVERSE_OPTIONS,
+                index=UNIVERSE_OPTIONS.index(current_profile_settings.get("default_universe", PROFILE_DEFAULT_SETTINGS["default_universe"])) if current_profile_settings.get("default_universe") in UNIVERSE_OPTIONS else 0,
+                help="Which universe should appear first for this profile?",
+                key=f"profile_default_universe_{_profile_slug(active_profile)}",
+            )
+            ps_view_by = st.selectbox(
+                "Default View By",
+                PROFILE_VIEW_BY_OPTIONS,
+                index=PROFILE_VIEW_BY_OPTIONS.index(current_profile_settings.get("default_view_by", PROFILE_DEFAULT_SETTINGS["default_view_by"])) if current_profile_settings.get("default_view_by") in PROFILE_VIEW_BY_OPTIONS else 0,
+                help="Which ranking lens should this profile start with?",
+                key=f"profile_default_view_by_{_profile_slug(active_profile)}",
+            )
+            ps_gate = st.selectbox(
+                "Default Candidate Quality Gate",
+                PROFILE_CANDIDATE_GATE_OPTIONS,
+                index=PROFILE_CANDIDATE_GATE_OPTIONS.index(current_profile_settings.get("default_candidate_gate", PROFILE_DEFAULT_SETTINGS["default_candidate_gate"])) if current_profile_settings.get("default_candidate_gate") in PROFILE_CANDIDATE_GATE_OPTIONS else 0,
+                help="How strict should the Top Qualified Opportunities cards be by default?",
+                key=f"profile_default_gate_{_profile_slug(active_profile)}",
+            )
+            if st.button("💾 Save profile defaults", use_container_width=True, key=f"save_profile_defaults_{_profile_slug(active_profile)}"):
+                save_profile_settings(active_profile, {
+                    "default_universe": ps_universe,
+                    "default_view_by": ps_view_by,
+                    "default_candidate_gate": ps_gate,
+                })
+                st.session_state.force_profile_defaults = True
+                st.success("Saved. Reloading this profile with the new defaults…")
+                st.rerun()
+        default_summary = f"{current_profile_settings.get('default_view_by', '🎯 8% Target Hunter').split(' ', 1)[0]} · {current_profile_settings.get('default_candidate_gate', 'Balanced')}"
+        st.markdown(f"<div class='toolbar-help'>Defaults: {html.escape(default_summary)}</div>", unsafe_allow_html=True)
 
     with top_model_col:
         st.markdown("<div class='toolbar-label'>Model Settings</div>", unsafe_allow_html=True)
@@ -3357,7 +3460,7 @@ with rank_col_ui:
     ranking_mode = st.selectbox(
         "Choose how to rank the watchlist",
         RANKING_MODES,
-        index=0,
+        index=RANKING_MODES.index(st.session_state.get("ranking_mode_selector", "🎯 8% Target Hunter")) if st.session_state.get("ranking_mode_selector") in RANKING_MODES else 0,
         key="ranking_mode_selector",
         help="Choose how SwingIt ranks your watchlist without rerunning the scan.",
     )
@@ -3373,7 +3476,7 @@ with gate_col:
     candidate_gate_mode = st.selectbox(
         "Top card quality",
         CANDIDATE_GATE_MODES,
-        index=0,
+        index=CANDIDATE_GATE_MODES.index(st.session_state.get("candidate_gate_mode", "Balanced")) if st.session_state.get("candidate_gate_mode") in CANDIDATE_GATE_MODES else 0,
         key="candidate_gate_mode",
         help="Prevents weak names from being forced into the Best Swing Opportunities cards.",
     )
