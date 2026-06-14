@@ -1,5 +1,5 @@
 """
-SwingIt V9.2 — Trading Terminal UI, Favorites, CSV, Faster Scans
+SwingIt V9.3 — Trading Terminal UI, Top Bar Controls
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V9.2",
+    page_title="SwingIt V9.3",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -86,6 +86,36 @@ st.markdown(
         letter-spacing:.03em;
     }
     [data-testid="stMetricValue"] { color:var(--text)!important; font-weight:800; }
+    .quick-filter-card {
+        display:block;
+        text-decoration:none!important;
+        background:var(--surface);
+        border:1px solid var(--border);
+        border-radius:14px;
+        padding:14px 16px;
+        box-shadow:0 1px 2px rgba(15,23,42,.04);
+        min-height:86px;
+        transition:all .15s ease;
+    }
+    .quick-filter-card:hover {
+        transform:translateY(-1px);
+        border-color:#b7c4d6;
+        box-shadow:0 6px 18px rgba(15,23,42,.08);
+    }
+    .quick-filter-label {
+        color:var(--muted);
+        font-size:.75rem;
+        text-transform:uppercase;
+        letter-spacing:.03em;
+        font-weight:800;
+        margin-bottom:.35rem;
+    }
+    .quick-filter-value {
+        color:var(--text);
+        font-size:2rem;
+        line-height:1;
+        font-weight:900;
+    }
     [data-testid="stDataFrame"] {
         border:1px solid var(--border)!important;
         border-radius:14px;
@@ -126,7 +156,7 @@ st.markdown(
         box-shadow:0 12px 28px rgba(15,23,42,.07);
         margin-bottom:16px;
     }
-    .terminal-title {font-size:2.05rem;font-weight:950;letter-spacing:-.04em;margin-bottom:2px;}
+    .terminal-title {font-size:1.75rem;font-weight:950;letter-spacing:-.04em;margin-bottom:2px;white-space:nowrap;}
     .terminal-subtitle {color:var(--muted);font-size:.92rem;margin-bottom:12px;}
     .toolbar-label {font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:900;margin-bottom:3px;text-align:center;}
     .toolbar-help {font-size:.72rem;color:var(--muted);text-align:center;margin-top:-4px;}
@@ -277,70 +307,74 @@ UNIVERSE_HINTS = {
     "Custom list": "Paste tickers manually",
 }
 
-st.markdown(
-    """
-    <div class="terminal-hero">
-        <div class="terminal-title">🔥 SwingIt V9.2</div>
-        <div class="terminal-subtitle">A cleaner trading-terminal layout for finding RSI panic rebound candidates.</div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-bar_col1, bar_col2, bar_col3 = st.columns([2.4, 1.65, 1.05], vertical_alignment="bottom")
-with bar_col1:
-    st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
-    universe = st.selectbox(
-        "Universe",
-        UNIVERSE_OPTIONS,
-        index=0,
-        label_visibility="collapsed",
-        help="Choose the group to scan. The app scans the full selected universe by default.",
-        key="top_universe",
+with st.container(border=True):
+    top_title_col, top_universe_col, top_model_col, top_run_col = st.columns(
+        [1.35, 2.35, 1.65, 1.25],
+        vertical_alignment="center",
     )
-    st.markdown(f"<div class='toolbar-help'>{html.escape(UNIVERSE_HINTS.get(universe, ''))}</div>", unsafe_allow_html=True)
 
-with bar_col2:
-    st.markdown("<div class='toolbar-label'>Model Settings</div>", unsafe_allow_html=True)
-    with st.popover("⚙️ Configure", use_container_width=True):
-        profit_target = st.select_slider(
-            "Profit goal",
-            options=[5, 8, 10, 12, 15, 20],
-            value=8,
-            help="A historical RSI panic event counts as useful if it reached this max closing-price bounce within the selected window."
+    with top_title_col:
+        st.markdown(
+            """
+            <div class="terminal-title">🔥 SwingIt V9.3</div>
+            <div class="terminal-subtitle">RSI panic rebound candidates.</div>
+            """,
+            unsafe_allow_html=True,
         )
-        bounce_window = st.select_slider(
-            "Swing window",
-            options=[10, 15, 20, 30, 45, 60],
-            value=30,
-            help="Trading days after the oversold low to measure the best closing-price bounce."
-        )
-        spring_timeframe = st.selectbox(
-            "TTM timeframe",
-            ["1D", "1H"],
+
+    with top_universe_col:
+        st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
+        universe = st.selectbox(
+            "Universe",
+            UNIVERSE_OPTIONS,
             index=0,
-            help="1D is better for 1–4 week swing context. 1H is better for near-term timing/watchlist urgency."
+            label_visibility="collapsed",
+            help="Choose the group to scan. The app scans the full selected universe by default.",
+            key="top_universe",
         )
-        include_news = st.toggle(
-            "News/catalyst score",
-            value=True,
-            help="Adds lightweight Yahoo Finance headline scoring. Turn off if a large scan feels slow."
-        )
-        max_workers = st.select_slider(
-            "Scan speed",
-            options=[1, 4, 8, 12, 16],
-            value=8,
-            help="Higher = faster, but very high settings may trigger data-provider hiccups on huge universes."
-        )
-    st.markdown(
-        f"<div class='toolbar-help'>Goal {profit_target}% · {bounce_window}d · TTM {spring_timeframe}</div>",
-        unsafe_allow_html=True,
-    )
+        st.markdown(f"<div class='toolbar-help'>{html.escape(UNIVERSE_HINTS.get(universe, ''))}</div>", unsafe_allow_html=True)
 
-with bar_col3:
-    st.markdown("<div class='toolbar-label'>&nbsp;</div>", unsafe_allow_html=True)
-    run = st.button("🚀 Run Swing Scan", use_container_width=True)
-    st.markdown("<div class='run-note'>Use ToS for entries/exits.</div>", unsafe_allow_html=True)
+    with top_model_col:
+        st.markdown("<div class='toolbar-label'>Model Settings</div>", unsafe_allow_html=True)
+        with st.popover("⚙️ Configure", use_container_width=True):
+            profit_target = st.select_slider(
+                "Profit goal",
+                options=[5, 8, 10, 12, 15, 20],
+                value=8,
+                help="A historical RSI panic event counts as useful if it reached this max closing-price bounce within the selected window."
+            )
+            bounce_window = st.select_slider(
+                "Swing window",
+                options=[10, 15, 20, 30, 45, 60],
+                value=30,
+                help="Trading days after the oversold low to measure the best closing-price bounce."
+            )
+            spring_timeframe = st.selectbox(
+                "TTM timeframe",
+                ["1D", "1H"],
+                index=0,
+                help="1D is better for 1–4 week swing context. 1H is better for near-term timing/watchlist urgency."
+            )
+            include_news = st.toggle(
+                "News/catalyst score",
+                value=True,
+                help="Adds lightweight Yahoo Finance headline scoring. Turn off if a large scan feels slow."
+            )
+            max_workers = st.select_slider(
+                "Scan speed",
+                options=[1, 4, 8, 12, 16],
+                value=8,
+                help="Higher = faster, but very high settings may trigger data-provider hiccups on huge universes."
+            )
+        st.markdown(
+            f"<div class='toolbar-help'>Goal {profit_target}% · {bounce_window}d · TTM {spring_timeframe}</div>",
+            unsafe_allow_html=True,
+        )
+
+    with top_run_col:
+        st.markdown("<div class='toolbar-label'>&nbsp;</div>", unsafe_allow_html=True)
+        run = st.button("🚀 Run Swing Scan", use_container_width=True)
+        st.markdown("<div class='run-note'>Use ToS for entries/exits.</div>", unsafe_allow_html=True)
 
 if universe == "Custom list":
     custom_input = st.text_area(
@@ -2939,28 +2973,38 @@ rsi_under_40_count = int((pd.to_numeric(df["RSI"], errors="coerce") < 40).sum())
 high_conf_count = int(df["Confidence"].astype(str).str.contains("High", na=False).sum())
 setup_75_count = int((pd.to_numeric(df["Setup Quality"], errors="coerce") >= 75).sum())
 
+# Query-string quick filters make the summary numbers themselves clickable.
+quick_filter_param = st.query_params.get("quick_filter", None)
+if quick_filter_param:
+    quick_filter_map = {
+        "all": "All",
+        "rsi40": "RSI < 40",
+        "highconf": "High confidence",
+        "setup75": "Setup ≥75",
+    }
+    st.session_state.leaderboard_filter = quick_filter_map.get(str(quick_filter_param).lower(), st.session_state.get("leaderboard_filter", "All"))
+
 st.markdown("### Quick filters")
+
+def quick_filter_card(label, value, query_value):
+    return f"""
+    <a class="quick-filter-card" href="?quick_filter={query_value}">
+        <div class="quick-filter-label">{_safe_html(label)}</div>
+        <div class="quick-filter-value">{_safe_html(value)}</div>
+    </a>
+    """
+
 fc1, fc2, fc3, fc4, fc5 = st.columns(5)
 with fc1:
-    st.metric("Scanned", active_tickers_scanned or len(results))
-    if st.button("Show scanned", use_container_width=True, key="filter_scanned"):
-        st.session_state.leaderboard_filter = "All"
+    st.markdown(quick_filter_card("Scanned", active_tickers_scanned or len(results), "all"), unsafe_allow_html=True)
 with fc2:
-    st.metric("Usable results", len(df))
-    if st.button("Show usable", use_container_width=True, key="filter_usable"):
-        st.session_state.leaderboard_filter = "All"
+    st.markdown(quick_filter_card("Usable results", len(df), "all"), unsafe_allow_html=True)
 with fc3:
-    st.metric("RSI < 40 now", rsi_under_40_count)
-    if st.button("Show RSI < 40", use_container_width=True, key="filter_rsi40"):
-        st.session_state.leaderboard_filter = "RSI < 40"
+    st.markdown(quick_filter_card("RSI < 40 now", rsi_under_40_count, "rsi40"), unsafe_allow_html=True)
 with fc4:
-    st.metric("High-confidence patterns", high_conf_count)
-    if st.button("Show high confidence", use_container_width=True, key="filter_highconf"):
-        st.session_state.leaderboard_filter = "High confidence"
+    st.markdown(quick_filter_card("High-confidence patterns", high_conf_count, "highconf"), unsafe_allow_html=True)
 with fc5:
-    st.metric("Setup ≥75", setup_75_count)
-    if st.button("Show setup ≥75", use_container_width=True, key="filter_setup75"):
-        st.session_state.leaderboard_filter = "Setup ≥75"
+    st.markdown(quick_filter_card("Setup ≥75", setup_75_count, "setup75"), unsafe_allow_html=True)
 
 st.markdown("### 🎯 View By")
 rank_col_ui, rank_help_col = st.columns([1.4, 2.6])
