@@ -1,5 +1,5 @@
 """
-SwingIt V3.3 — RSI Panic Swing Outcome Engine
+SwingIt V4 — RSI Panic + Catalyst Swing Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -27,7 +27,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V3.3",
+    page_title="SwingIt V4",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -130,7 +130,7 @@ if "scan_meta" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V3.3")
+    st.markdown("## 🔥 SwingIt V4")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -164,9 +164,9 @@ with st.sidebar:
     )
 
     include_news = st.toggle(
-        "Add news snapshot",
+        "Add catalyst/news score",
         value=True,
-        help="Adds a lightweight Yahoo Finance news read. It can slow the scan a little, so turn it off if the app feels laggy."
+        help="Adds a lightweight Yahoo Finance headline catalyst score. It can slow the scan a little, so turn it off if the app feels laggy."
     )
 
     st.divider()
@@ -451,13 +451,23 @@ def analyze_rsi_swing_outcomes(close, rsi_series, profit_target=8, bounce_days=3
 
 NEWS_POSITIVE_WORDS = [
     "beat", "beats", "upgrade", "upgraded", "raises", "raised", "record", "growth", "profit", "profits",
-    "strong", "bullish", "partnership", "contract", "approval", "launch", "expands", "outperform",
-    "buy", "guidance", "surge", "rallies", "rebound"
+    "strong", "bullish", "approval", "approved", "outperform", "buy", "surge", "rallies", "rebound",
+    "wins", "winner", "accelerates", "expands", "expansion", "launch", "launched", "contract", "deal"
 ]
 NEWS_NEGATIVE_WORDS = [
     "miss", "misses", "downgrade", "downgraded", "cuts", "cut", "lawsuit", "probe", "investigation",
     "weak", "bearish", "layoffs", "recall", "decline", "falls", "slumps", "warning", "loss", "losses",
-    "guidance cut", "underperform", "sell", "debt", "concern", "concerns"
+    "underperform", "sell", "debt", "concern", "concerns", "delays", "delayed", "halts", "halted"
+]
+CATALYST_STRONG_WORDS = [
+    "earnings", "guidance", "raises guidance", "beats", "beat", "fda", "approval", "approved",
+    "contract", "deal", "partnership", "acquisition", "merger", "buyout", "tender", "launch",
+    "ai", "artificial intelligence", "cloud", "data center", "semiconductor", "trial", "phase 3",
+    "activist", "strategic review", "spin-off", "spinoff"
+]
+CATALYST_MEDIUM_WORDS = [
+    "upgrade", "upgraded", "price target", "outperform", "conference", "presentation", "expands",
+    "expansion", "product", "analyst", "initiates", "selected", "collaboration", "award"
 ]
 
 
@@ -496,53 +506,137 @@ def _safe_news_time(item):
     return None
 
 
+def _keyword_count(text: str, words: list[str]) -> int:
+    return sum(1 for word in words if word in text)
+
+
+def catalyst_score_from_news(headlines, dates, volume_ratio=None):
+    """Scores whether recent public headlines give the stock a reason to move.
+
+    This is intentionally lightweight: it uses Yahoo Finance headlines from yfinance,
+    keyword buckets, headline recency, and volume confirmation. It is not sentiment AI
+    and should be treated as a catalyst clue, not truth.
+    """
+    if not headlines:
+        return {
+            "catalyst_score": 0,
+            "catalyst_label": "⚪ No catalyst",
+            "catalyst_reason": "No recent headlines found.",
+            "news_label": "📰 No news",
+            "news_headline": "No recent Yahoo Finance headlines found.",
+            "news_age_days": None,
+            "news_tone": "None",
+        }
+
+    today = datetime.date.today()
+    most_recent = max(dates) if dates else None
+    age_days = (today - most_recent).days if most_recent else None
+
+    if age_days is None:
+        recency_points = 15
+        recency_label = "Recent"
+    elif age_days <= 2:
+        recency_points = 30
+        recency_label = "Fresh"
+    elif age_days <= 7:
+        recency_points = 24
+        recency_label = "Recent"
+    elif age_days <= 21:
+        recency_points = 14
+        recency_label = "Older"
+    elif age_days <= 45:
+        recency_points = 7
+        recency_label = "Old"
+    else:
+        recency_points = 0
+        recency_label = "Stale"
+
+    text = " ".join(headlines).lower()
+    pos = _keyword_count(text, NEWS_POSITIVE_WORDS)
+    neg = _keyword_count(text, NEWS_NEGATIVE_WORDS)
+    strong = _keyword_count(text, CATALYST_STRONG_WORDS)
+    medium = _keyword_count(text, CATALYST_MEDIUM_WORDS)
+
+    strength_points = min(40, strong * 18 + medium * 9)
+    if strength_points >= 30:
+        strength_label = "Strong"
+    elif strength_points >= 12:
+        strength_label = "Medium"
+    elif strength_points > 0:
+        strength_label = "Light"
+    else:
+        strength_label = "Weak"
+
+    if pos > neg:
+        tone = "Positive"
+        tone_points = 20
+        tone_emoji = "🟢"
+    elif neg > pos:
+        tone = "Negative"
+        tone_points = 0
+        tone_emoji = "🔴"
+    else:
+        tone = "Mixed/neutral"
+        tone_points = 10
+        tone_emoji = "🟡"
+
+    vr = volume_ratio or 0
+    if vr >= 2.5:
+        volume_points = 10
+    elif vr >= 1.5:
+        volume_points = 7
+    elif vr >= 1.1:
+        volume_points = 4
+    else:
+        volume_points = 0
+
+    score = int(round(clamp(recency_points + strength_points + tone_points + volume_points)))
+
+    if score >= 75:
+        catalyst_label = f"🔥 {recency_label} / {strength_label} catalyst"
+    elif score >= 50:
+        catalyst_label = f"🟢 {recency_label} / {tone}"
+    elif score >= 25:
+        catalyst_label = f"🟡 {recency_label} / {tone}"
+    else:
+        catalyst_label = f"⚪ {recency_label} / weak catalyst"
+
+    return {
+        "catalyst_score": score,
+        "catalyst_label": catalyst_label,
+        "catalyst_reason": f"{recency_label} headline · {strength_label} catalyst keywords · {tone.lower()} tone · volume {vr:.1f}x avg" if vr else f"{recency_label} headline · {strength_label} catalyst keywords · {tone.lower()} tone",
+        "news_label": f"{tone_emoji} {recency_label} / {tone}",
+        "news_headline": headlines[0][:160],
+        "news_age_days": age_days,
+        "news_tone": tone,
+    }
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_news_snapshot(ticker: str):
-    """Returns a simple, non-trading news label. Uses headline keywords only."""
+def get_news_snapshot(ticker: str, volume_ratio: float | None = None):
+    """Returns headline snapshot plus a catalyst score. Uses Yahoo Finance via yfinance."""
     try:
         items = yf.Ticker(ticker).news or []
         headlines = []
         dates = []
-        for item in items[:8]:
+        for item in items[:10]:
             title = _safe_news_title(item).strip()
             if title:
                 headlines.append(title)
                 d = _safe_news_time(item)
                 if d:
                     dates.append(d)
-
-        if not headlines:
-            return {"news_label": "📰 No news", "news_headline": "No recent Yahoo Finance headlines found."}
-
-        text = " ".join(headlines).lower()
-        pos = sum(1 for word in NEWS_POSITIVE_WORDS if word in text)
-        neg = sum(1 for word in NEWS_NEGATIVE_WORDS if word in text)
-
-        most_recent = max(dates) if dates else None
-        if most_recent:
-            age_days = (datetime.date.today() - most_recent).days
-            recency = "Recent" if age_days <= 7 else "Older"
-        else:
-            recency = "Recent"
-
-        if pos > neg:
-            tone = "Positive"
-            emoji = "🟢"
-        elif neg > pos:
-            tone = "Negative"
-            emoji = "🔴"
-        else:
-            tone = "Mixed/neutral"
-            emoji = "🟡"
-
-        return {
-            "news_label": f"{emoji} {recency} / {tone}",
-            "news_headline": headlines[0][:140],
-        }
+        return catalyst_score_from_news(headlines, dates, volume_ratio=volume_ratio)
     except Exception:
-        return {"news_label": "📰 News unavailable", "news_headline": "News lookup failed or was rate-limited."}
-
-
+        return {
+            "catalyst_score": 0,
+            "catalyst_label": "📰 News unavailable",
+            "catalyst_reason": "News lookup failed or was rate-limited.",
+            "news_label": "📰 News unavailable",
+            "news_headline": "News lookup failed or was rate-limited.",
+            "news_age_days": None,
+            "news_tone": "Unavailable",
+        }
 
 
 def confidence_from_history(event_count, recovery_rate):
@@ -583,14 +677,34 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
         opp_score = current_rsi_opportunity_score(current_rsi)
         rebounds = analyze_rsi_swing_outcomes(close, rsi_series, profit_target=profit_target, bounce_days=bounce_days)
         history_score = rebounds["history_score"]
+        avg_vol_20d = float(volume.tail(20).mean()) if len(volume) else None
+        current_volume = float(volume.iloc[-1]) if len(volume) else None
+        volume_ratio = (current_volume / avg_vol_20d) if avg_vol_20d and avg_vol_20d > 0 and current_volume else None
         confidence_score, confidence_label = confidence_from_history(
             rebounds.get("event_count", 0),
             rebounds.get("swing_success_rate"),
         )
 
-        # Swing score = historical edge + current opportunity.
-        # This prevents stocks that already fully recovered from dominating the watchlist.
-        swing_score = int(round(clamp(0.58 * history_score + 0.42 * opp_score)))
+        # Swing Score V4 = current panic/proximity + historical rebound behavior + catalyst/news + volume confirmation.
+        # This keeps the app focused on watchlist candidates: washed-out, historically bouncy, and with a reason to move.
+        # News/catalyst is intentionally a smaller component so a weak headline cannot overpower poor RSI/rebound history.
+        news = get_news_snapshot(ticker, volume_ratio) if include_news_lookup else {
+            "catalyst_score": 0,
+            "catalyst_label": "Off",
+            "catalyst_reason": "Catalyst/news score is turned off.",
+            "news_label": "Off",
+            "news_headline": "News snapshot is turned off.",
+            "news_age_days": None,
+            "news_tone": "Off",
+        }
+        catalyst_score = news.get("catalyst_score", 0)
+        volume_score = 100 if (volume_ratio or 0) >= 2.5 else 70 if (volume_ratio or 0) >= 1.5 else 40 if (volume_ratio or 0) >= 1.1 else 0
+        swing_score = int(round(clamp(
+            0.40 * history_score +
+            0.32 * opp_score +
+            0.18 * catalyst_score +
+            0.10 * volume_score
+        )))
 
         # Momentum proximity flags for watchlist use, not entry signals.
         days_since_rsi_under_30 = None
@@ -598,7 +712,6 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
         if under_30_positions:
             days_since_rsi_under_30 = len(rsi_series) - 1 - under_30_positions[-1]
 
-        news = get_news_snapshot(ticker) if include_news_lookup else {"news_label": "Off", "news_headline": "News snapshot is turned off."}
         potential_sell_price = None
         if rebounds.get("avg_max_bounce_pct") is not None:
             potential_sell_price = current_price * (1 + float(rebounds["avg_max_bounce_pct"]) / 100)
@@ -607,7 +720,12 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "ticker": ticker,
             "price": round(current_price, 2),
             "potential_sell_price": round(float(potential_sell_price), 2) if potential_sell_price is not None else None,
-            "avg_vol_20d": int(volume.tail(20).mean()) if len(volume) else None,
+            "avg_vol_20d": int(avg_vol_20d) if avg_vol_20d else None,
+            "current_volume": int(current_volume) if current_volume else None,
+            "volume_ratio": round(float(volume_ratio), 2) if volume_ratio is not None else None,
+            "catalyst_score": int(round(catalyst_score or 0)),
+            "catalyst_label": news.get("catalyst_label"),
+            "catalyst_reason": news.get("catalyst_reason"),
             "current_rsi": round(current_rsi, 1) if current_rsi is not None else None,
             "opportunity": opportunity_label(current_rsi),
             "opportunity_score": int(round(opp_score)),
@@ -667,6 +785,7 @@ def hot_card(rank, row):
             Current {current_price} → Swing target {potential_price}<br>
             RSI {row['RSI']} · Potential {row['Avg Max Bounce']}<br>
             Avg max in {row['Avg Days to Max']} days · {row['History']}<br>
+            {row.get('Catalyst', '')}<br>
             {row.get('Confidence', '')}
         </div>
     </div>
@@ -732,7 +851,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V3.3")
+st.markdown("# 🔥 SwingIt V4")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
@@ -828,6 +947,10 @@ for r in results:
         "History": f"{r.get('event_count', 0)} events",
         "Confidence": r.get("confidence_label"),
         "Confidence Score": r.get("confidence_score"),
+        "Catalyst": r.get("catalyst_label"),
+        "Catalyst Score": r.get("catalyst_score"),
+        "Catalyst Reason": r.get("catalyst_reason"),
+        "Volume Ratio": r.get("volume_ratio"),
         "News": r.get("news_label"),
         "Headline": r.get("news_headline"),
         "History Score": r.get("history_score"),
@@ -876,10 +999,10 @@ ascending = sort_direction == "Ascending"
 display = df_sorted.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
-    "Ticker", "Swing Score", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "News"
+    "Ticker", "Swing Score", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst", "Catalyst Score"
 ]
 research_cols = compact_cols + [
-    "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "Catalyst Reason", "Volume Ratio", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -891,25 +1014,31 @@ st.dataframe(
     column_config={
         "Swing Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Confidence Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
+        "Catalyst Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "RSI": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
         "Price": st.column_config.NumberColumn(format="$%.2f"),
         "Potential Swing Price": st.column_config.NumberColumn(format="$%.2f"),
         "Avg Max Bounce": st.column_config.NumberColumn(format="%.1f%%"),
         "Win Rate": st.column_config.NumberColumn(format="%.1f%%"),
         "Risk / Reward": st.column_config.NumberColumn(format="%.2f"),
+        "Volume Ratio": st.column_config.NumberColumn(format="%.2fx"),
         "Avg Drawdown After Low": st.column_config.NumberColumn(format="%.1f%%"),
     },
 )
 
 with st.expander("What the Swing Score means"):
     st.markdown(f"""
-    **Swing Score** is now a historical swing-outcome score, not an RSI recovery score.
+    **Swing Score V4** is a watchlist score: *is this stock washed out, historically bouncy, and does it have a reason to move?*
 
     It combines:
 
     **1. Current opportunity score** — how close the stock is to an actionable RSI rebound zone right now. RSI under 30 scores highest; RSI 30–40 is still watchable; RSI above 50 scores low because it may have already recovered.
 
-    **2. Historical swing outcome score** — what happened after prior RSI&lt;30 panic events. The model now asks: *within {active_bounce_window} trading days after the panic low, did this stock create a tradeable bounce?*
+    **2. Historical swing outcome score** — what happened after prior RSI&lt;30 panic events. The model asks: *within {active_bounce_window} trading days after the panic low, did this stock create a tradeable bounce?*
+
+    **3. Catalyst score** — lightweight recent-news scoring from Yahoo Finance headlines. It looks at recency, positive/negative tone keywords, catalyst-type keywords such as earnings, guidance, contracts, AI, approvals, launches, analyst upgrades, and whether volume is above normal.
+
+    **4. Volume confirmation** — higher current volume versus the 20-day average can add confirmation that the market is actually paying attention.
 
     The historical score uses:
     - **Win rate**: how often prior panic events reached at least the selected {active_profit_target}% swing profit goal.
@@ -925,6 +1054,8 @@ with st.expander("What the Swing Score means"):
     **Confidence** is separate from Swing Score. Low confidence means only 1–2 prior RSI&lt;30 events, Medium means 3–5 events, and High means 6+ events.
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
+
+    Current V4 weighting: 40% historical swing behavior, 32% current RSI opportunity, 18% catalyst/news, 10% volume confirmation.
 
     This is meant to produce a **watchlist**, not a buy signal. Entries should still come from price action, VWAP, volume, support/reclaim behavior, and your 5m/15m process.
     """)
@@ -954,10 +1085,11 @@ if detail:
     tags.append(f"<span class='tag tag-green'>{detail.get('event_count', 0)} historical RSI&lt;30 events</span>")
     if detail.get("confidence_label"):
         tags.append(f"<span class='tag tag-blue'>{detail.get('confidence_label')}</span>")
-    news_label = detail.get("news_label")
-    if news_label:
-        tags.append(f"<span class='tag tag-blue'>{news_label}</span>")
+    if detail.get("catalyst_label"):
+        tags.append(f"<span class='tag tag-blue'>{detail.get('catalyst_label')} · {detail.get('catalyst_score', 0)}/100</span>")
     st.markdown("".join(tags), unsafe_allow_html=True)
+    if detail.get("catalyst_reason"):
+        st.caption(f"Catalyst read: {detail['catalyst_reason']}")
     if detail.get("news_headline"):
         st.caption(f"Top headline: {detail['news_headline']}")
 
@@ -976,6 +1108,6 @@ csv = export.to_csv(index=False)
 st.download_button(
     "Download watchlist CSV",
     data=csv,
-    file_name=f"swingit_v3_3_{datetime.date.today()}.csv",
+    file_name=f"swingit_v4_{datetime.date.today()}.csv",
     mime="text/csv",
 )
