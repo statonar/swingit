@@ -1,5 +1,5 @@
 """
-SwingIt V7.1.1 — More Accurate Universes
+SwingIt V8 — UX, Favorites, CSV, Faster Scans
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -13,6 +13,9 @@ Not financial advice. Use as a watchlist engine, not an entry/exit system.
 from io import StringIO
 import datetime
 import html
+import json
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 import re
 
@@ -29,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V7.1",
+    page_title="SwingIt V8",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -202,6 +205,8 @@ if "scan_meta" not in st.session_state:
     st.session_state.scan_meta = None
 if "leaderboard_filter" not in st.session_state:
     st.session_state.leaderboard_filter = "All"
+if "cancel_scan_requested" not in st.session_state:
+    st.session_state.cancel_scan_requested = False
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Sidebar — intentionally pared back
@@ -214,6 +219,8 @@ with st.sidebar:
         "Universe",
         [
             "⭐ SwingIt Elite (Recommended)",
+            "⭐ Favorites",
+            "📂 CSV upload",
             "🧠 Institutional Favorites",
             "🚀 AI & Semiconductors",
             "S&P 500",
@@ -232,12 +239,19 @@ with st.sidebar:
         ],
         help="Choose the group to scan. The app now scans the full selected universe by default."
     )
+    csv_uploaded = None
     if universe == "Custom list":
         custom_input = st.text_area(
             "Custom tickers",
             placeholder="ORCL, ADBE, AMZN, MSFT",
             height=80,
             help="Comma, semicolon, or newline separated."
+        )
+    elif universe == "📂 CSV upload":
+        csv_uploaded = st.file_uploader(
+            "Upload ticker CSV",
+            type=["csv"],
+            help="Upload a CSV with a Ticker/Symbol column, or a one-column ticker list."
         )
 
     st.caption("Scans the full selected universe. Larger universes may take longer.")
@@ -266,10 +280,76 @@ with st.sidebar:
             value=True,
             help="Adds lightweight Yahoo Finance headline scoring. Turn off if a large scan feels slow."
         )
+        max_workers = st.select_slider(
+            "Scan speed",
+            options=[1, 4, 8, 12, 16],
+            value=8,
+            help="Higher = faster, but very high settings may trigger data-provider hiccups on huge universes."
+        )
 
     run = st.button("Run Swing Scan", use_container_width=True)
     st.caption("Watchlist engine only — use ToS for entry/exit decisions.")
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Favorites + uploaded universe helpers
+# ──────────────────────────────────────────────────────────────────────────────
+FAVORITES_FILE = "swingit_favorites.json"
+
+
+def _normalize_ticker(ticker: str) -> str:
+    return str(ticker).strip().upper().replace(".", "-")
+
+
+def load_favorites() -> list[str]:
+    """Load persistent favorites from a small JSON file in the app directory."""
+    try:
+        if os.path.exists(FAVORITES_FILE):
+            with open(FAVORITES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return dedupe([_normalize_ticker(t) for t in data if str(t).strip()])
+    except Exception:
+        pass
+    return []
+
+
+def save_favorites(tickers: list[str]) -> None:
+    try:
+        clean = dedupe([_normalize_ticker(t) for t in tickers if str(t).strip()])
+        with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
+            json.dump(clean, f, indent=2)
+    except Exception:
+        st.warning("Could not save favorites to disk in this environment. They will still work during this session.")
+
+
+def parse_uploaded_tickers(uploaded_file) -> list[str]:
+    """Parse a CSV upload with Ticker/Symbol column or a one-column ticker list."""
+    if uploaded_file is None:
+        return []
+    try:
+        uploaded_file.seek(0)
+        df_upload = pd.read_csv(uploaded_file)
+        if df_upload.empty:
+            return []
+        lower_cols = {str(c).strip().lower(): c for c in df_upload.columns}
+        preferred = None
+        for name in ["ticker", "symbol", "tickers", "symbols"]:
+            if name in lower_cols:
+                preferred = lower_cols[name]
+                break
+        if preferred is None:
+            preferred = df_upload.columns[0]
+        return dedupe([_normalize_ticker(v) for v in df_upload[preferred].dropna().tolist() if str(v).strip()])
+    except Exception:
+        try:
+            uploaded_file.seek(0)
+            text = uploaded_file.read().decode("utf-8", errors="ignore")
+            raw = text.replace("\n", ",").replace(";", ",")
+            return dedupe([_normalize_ticker(t) for t in raw.split(",") if t.strip() and t.strip().lower() not in ["ticker", "symbol"]])
+        except Exception:
+            return []
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Universe helpers
@@ -511,7 +591,13 @@ def get_universe_payload(selected_universe: str, custom_text: str = ""):
         add_sources(source_map, names, etf)
         return names
 
-    if selected_universe == "S&P 500":
+    if selected_universe == "⭐ Favorites":
+        tickers = load_favorites(); add_sources(source_map, tickers, "Favorites")
+    elif selected_universe == "📂 CSV upload":
+        raw = custom_text.replace("\n", ",").replace(";", ",")
+        tickers = dedupe([t for t in raw.split(",") if t.strip()])
+        add_sources(source_map, tickers, "CSV Upload")
+    elif selected_universe == "S&P 500":
         tickers = get_sp500(); add_sources(source_map, tickers, "S&P 500")
     elif selected_universe == "NASDAQ 100":
         tickers = get_nasdaq100(); add_sources(source_map, tickers, "NASDAQ 100")
@@ -2349,11 +2435,16 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V6.5")
+st.markdown("# 🔥 SwingIt V8")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
-    all_tickers, source_map = get_universe_payload(universe, custom_input)
+    st.session_state.cancel_scan_requested = False
+    universe_text = custom_input
+    if universe == "📂 CSV upload":
+        uploaded_tickers = parse_uploaded_tickers(csv_uploaded)
+        universe_text = ",".join(uploaded_tickers)
+    all_tickers, source_map = get_universe_payload(universe, universe_text)
     if not all_tickers:
         st.warning("No tickers found. Check your custom list or choose another universe.")
         st.stop()
@@ -2365,6 +2456,7 @@ if run:
         "bounce_window": bounce_window,
         "include_news": include_news,
         "spring_timeframe": spring_timeframe,
+        "scan_speed": max_workers,
         "tickers_scanned": len(tickers),
         "source_map": {t: source_map.get(t, []) for t in tickers},
         "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
@@ -2373,17 +2465,42 @@ if run:
     st.info(f"Scanning full universe: {len(tickers)} tickers from {universe}…")
     progress = st.progress(0)
     status = st.empty()
+    leaders_box = st.empty()
+    cancel_box = st.empty()
+    cancel_box.caption("Tip: to stop a very large scan, use Streamlit's stop control or refresh the app. V8 stores completed results after the scan finishes.")
 
     results = []
-    for i, ticker in enumerate(tickers):
-        status.caption(f"Checking {ticker}…")
-        candidate = compute_candidate(ticker, profit_target, bounce_window, include_news, spring_timeframe)
-        if candidate:
-            results.append(candidate)
-        progress.progress((i + 1) / len(tickers))
+    completed = 0
+
+    # Parallel scan: keeps the UI responsive enough to show progress while reducing long universe waits.
+    # If a provider throttles requests, lower Scan speed in Model settings.
+    with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
+        future_map = {
+            executor.submit(compute_candidate, ticker, profit_target, bounce_window, include_news, spring_timeframe): ticker
+            for ticker in tickers
+        }
+        for future in as_completed(future_map):
+            ticker = future_map[future]
+            completed += 1
+            try:
+                candidate = future.result()
+            except Exception:
+                candidate = None
+            if candidate:
+                results.append(candidate)
+
+            status.caption(f"Scanned {completed:,} / {len(tickers):,} tickers · Latest: {ticker} · Usable: {len(results):,}")
+            progress.progress(min(completed / len(tickers), 1.0))
+
+            if results and (completed % 25 == 0 or completed == len(tickers)):
+                preview = sorted(results, key=lambda r: float(r.get('setup_quality', 0)), reverse=True)[:5]
+                preview_text = " · ".join([f"{r.get('ticker')} {int(r.get('setup_quality', 0))}" for r in preview])
+                leaders_box.info(f"Live leaders by Setup Quality: {preview_text}")
 
     progress.empty()
     status.empty()
+    leaders_box.empty()
+    cancel_box.empty()
     st.session_state.scan_results = results
     st.session_state.leaderboard_filter = "All"
 
@@ -2433,11 +2550,13 @@ if not results:
 # Compact model output table.
 company_lookup = get_company_lookup(active_universe)
 active_source_map = meta.get("source_map", {}) or {}
+favorites_now = set(load_favorites())
 rows = []
 for r in results:
     ticker_sources = active_source_map.get(r["ticker"], [])
     rows.append({
         "Ticker": r["ticker"],
+        "Favorite": "★" if r["ticker"] in favorites_now else "",
         "Company": company_lookup.get(r["ticker"], ""),
         "Institution": institutional_label(ticker_sources),
         "Institution Score": institutional_score(ticker_sources),
@@ -2612,7 +2731,7 @@ ascending = sort_direction == "Ascending"
 display = filtered_df.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
-    "Ticker", "Active Rank Score", "Setup Quality", "Swing Score", "Rebound Stage", "Spring TF", "Spring", "Spring Score", "Attention", "Volume Trend", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
+    "Ticker", "Favorite", "Active Rank Score", "Setup Quality", "Swing Score", "Rebound Stage", "Spring TF", "Spring", "Spring Score", "Attention", "Volume Trend", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
 ]
 research_cols = compact_cols + [
     "🎯 Target Hunter Score", "⚡ Ready Now Score", "🧠 Confidence Rank Score", "🚀 Upside Rank Score", "Target Bounce Score", "Speed Score", "Rebound Stage Score", "Rebound Stage Reason", "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Trend Score", "Volume Trend Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Opportunity Remaining Score", "Opportunity Remaining %", "Move Completed %", "Cycle Low Price", "Cycle Target Price", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
@@ -2646,6 +2765,26 @@ st.dataframe(
         "Avg Drawdown After Low": st.column_config.NumberColumn(format="%.1f%%"),
     },
 )
+
+
+with st.expander("⭐ Favorites Manager", expanded=False):
+    favs = load_favorites()
+    st.caption("Favorites are a saved universe. Choose ⭐ Favorites in the sidebar to scan only these tickers.")
+    st.write(", ".join(favs) if favs else "No favorites saved yet.")
+    add_text = st.text_input("Add tickers to Favorites", placeholder="ORCL, ADBE, META", key="favorites_add_text")
+    fav_a, fav_b, fav_c = st.columns([1, 1, 3])
+    with fav_a:
+        if st.button("Add", key="favorites_add_button", use_container_width=True):
+            raw = add_text.replace("\n", ",").replace(";", ",")
+            additions = [_normalize_ticker(t) for t in raw.split(",") if t.strip()]
+            save_favorites(favs + additions)
+            st.success("Favorites updated")
+            st.rerun()
+    with fav_b:
+        if st.button("Clear", key="favorites_clear_button", use_container_width=True):
+            save_favorites([])
+            st.success("Favorites cleared")
+            st.rerun()
 
 with st.expander("What the Swing Score means"):
     st.markdown(f"""
@@ -2692,6 +2831,23 @@ selected = st.selectbox("Inspect ticker", display["Ticker"].tolist(), key="ticke
 detail = next((r for r in results if r["ticker"] == selected), None)
 
 if detail:
+    favs = load_favorites()
+    fav_col1, fav_col2, fav_col3 = st.columns([1, 1, 5])
+    if selected in favs:
+        with fav_col1:
+            if st.button("★ In Favorites", key=f"remove_favorite_{selected}", use_container_width=True):
+                save_favorites([t for t in favs if t != selected])
+                st.success(f"Removed {selected} from Favorites")
+                st.rerun()
+    else:
+        with fav_col1:
+            if st.button("☆ Add Favorite", key=f"add_favorite_{selected}", use_container_width=True):
+                save_favorites(favs + [selected])
+                st.success(f"Added {selected} to Favorites")
+                st.rerun()
+    with fav_col2:
+        st.caption(f"Favorites: {len(load_favorites())}")
+
     a, b, c, d, e, f, g = st.columns(7)
     a.metric("Setup Quality", f"{detail.get('setup_quality', 0)}/100")
     b.metric("Swing Score", f"{detail['swing_score']}/100")
