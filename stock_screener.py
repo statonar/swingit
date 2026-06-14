@@ -1,5 +1,5 @@
 """
-SwingIt V6 — Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V6.1 — Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V6",
+    page_title="SwingIt V6.1",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -198,7 +198,7 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V6")
+    st.markdown("## 🔥 SwingIt V6.1")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -1177,10 +1177,36 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
         )))
 
         # Momentum proximity flags for watchlist use, not entry signals.
+        # We track both:
+        # - the last date RSI was <30
+        # - the start date of the *current* oversold streak, if RSI is still <30 now
         days_since_rsi_under_30 = None
+        last_rsi_under_30_date = None
+        rsi_oversold_start_date = None
+
+        valid_rsi = rsi_series.dropna()
         under_30_positions = [idx for idx, val in enumerate(rsi_series) if pd.notna(val) and val < 30]
         if under_30_positions:
-            days_since_rsi_under_30 = len(rsi_series) - 1 - under_30_positions[-1]
+            last_under_pos = under_30_positions[-1]
+            days_since_rsi_under_30 = len(rsi_series) - 1 - last_under_pos
+            try:
+                last_rsi_under_30_date = rsi_series.index[last_under_pos].date()
+            except Exception:
+                last_rsi_under_30_date = None
+
+        if current_rsi is not None and current_rsi < 30 and not valid_rsi.empty:
+            current_label = valid_rsi.index[-1]
+            current_pos = rsi_series.index.get_loc(current_label)
+            start_pos = current_pos
+            while start_pos > 0:
+                prev_val = rsi_series.iloc[start_pos - 1]
+                if pd.isna(prev_val) or prev_val >= 30:
+                    break
+                start_pos -= 1
+            try:
+                rsi_oversold_start_date = rsi_series.index[start_pos].date()
+            except Exception:
+                rsi_oversold_start_date = None
 
         potential_sell_price = None
         if rebounds.get("avg_max_bounce_pct") is not None:
@@ -1220,6 +1246,8 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "confidence_label": confidence_label,
             "swing_score": swing_score,
             "days_since_rsi_under_30": days_since_rsi_under_30,
+            "last_rsi_under_30_date": last_rsi_under_30_date,
+            "rsi_oversold_start_date": rsi_oversold_start_date,
             "sma50": round(float(sma50.iloc[-1]), 2) if pd.notna(sma50.iloc[-1]) else None,
             "sma200": round(float(sma200.iloc[-1]), 2) if len(sma200) and pd.notna(sma200.iloc[-1]) else None,
             "df": df,
@@ -1332,6 +1360,9 @@ def hot_card(rank, row):
     avg_max = row.get("Avg Max Bounce", "—")
     avg_days = row.get("Avg Days to Max", "—")
     rsi = row.get("RSI", "—")
+    oversold_since = row.get("Oversold Since", None)
+    last_under_30_date = row.get("Last RSI <30 Date", None)
+    days_since_under_30 = row.get("Days Since RSI <30", None)
     history = row.get("History", "—")
     confidence = row.get("Confidence", "—")
     opportunity = row.get("Opportunity", "—")
@@ -1381,11 +1412,21 @@ def hot_card(rank, row):
         Potential swing price: {_safe_html(potential_price)}<br><br>
         The target uses the stock's average historical max bounce after RSI panic inside your selected swing window.
     """
+    if oversold_since not in [None, "", "—"] and not pd.isna(oversold_since):
+        oversold_line = f"RSI became oversold this streak: {_safe_html(oversold_since)}"
+    elif last_under_30_date not in [None, "", "—"] and not pd.isna(last_under_30_date):
+        oversold_line = f"Last RSI &lt;30 date: {_safe_html(last_under_30_date)}"
+        if days_since_under_30 not in [None, "", "—"] and not pd.isna(days_since_under_30):
+            oversold_line += f" ({_safe_html(days_since_under_30)} trading days ago)"
+    else:
+        oversold_line = "No RSI &lt;30 date found in the current lookback."
+
     rsi_tip = f"""
         <strong>RSI opportunity</strong><br>
         Current RSI: {_safe_html(rsi)}<br>
-        Opportunity label: {_safe_html(clean_label(opportunity))}<br><br>
-        Lower RSI generally means closer to the panic/rebound zone, but it is not an entry signal by itself.
+        Opportunity label: {_safe_html(clean_label(opportunity))}<br>
+        {oversold_line}<br><br>
+        This helps you compare the current selloff age against the stock's average days to max rebound. Lower RSI can be powerful, but it is not an entry signal by itself.
     """
     bounce_tip = f"""
         <strong>Historical bounce behavior</strong><br>
@@ -1653,6 +1694,8 @@ for r in results:
         "History Score": r.get("history_score"),
         "Opportunity Score": r.get("opportunity_score"),
         "Days Since RSI <30": r.get("days_since_rsi_under_30"),
+        "Last RSI <30 Date": r.get("last_rsi_under_30_date"),
+        "Oversold Since": r.get("rsi_oversold_start_date"),
         "Avg Lowest RSI": r.get("avg_lowest_rsi"),
         "Avg Drawdown After Low": r.get("avg_post_low_drawdown_pct"),
     })
@@ -1744,7 +1787,7 @@ compact_cols = [
     "Ticker", "Setup Quality", "Swing Score", "Spring TF", "Spring", "Spring Score", "Attention", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
 ]
 research_cols = compact_cols + [
-    "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
