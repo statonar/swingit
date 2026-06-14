@@ -1,5 +1,5 @@
 """
-SwingIt V5.2.2 — RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V5.3 — RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V5.2.2",
+    page_title="SwingIt V5.3",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -154,13 +154,15 @@ if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 if "scan_meta" not in st.session_state:
     st.session_state.scan_meta = None
+if "leaderboard_filter" not in st.session_state:
+    st.session_state.leaderboard_filter = "All"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Sidebar — intentionally pared back
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V5.2.1")
+    st.markdown("## 🔥 SwingIt V5.3")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -1216,7 +1218,7 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V5.2.1")
+st.markdown("# 🔥 SwingIt V5.3")
 
 # When the button is clicked, run the scan once and store the result.
 if run:
@@ -1252,6 +1254,7 @@ if run:
     progress.empty()
     status.empty()
     st.session_state.scan_results = results
+    st.session_state.leaderboard_filter = "All"
 
 # If no scan has been run yet, show landing state.
 if st.session_state.scan_results is None:
@@ -1341,16 +1344,57 @@ for r in results:
 df = pd.DataFrame(rows)
 df_sorted = df.sort_values(["Setup Quality", "Swing Score", "RSI"], ascending=[False, False, True], na_position="last").reset_index(drop=True)
 
-# Top summary metrics
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Scanned", active_tickers_scanned or len(results))
-c2.metric("Usable results", len(df_sorted))
-c3.metric("RSI < 40 now", int((pd.to_numeric(df_sorted["RSI"], errors="coerce") < 40).sum()))
-c4.metric("High-confidence patterns", int(df_sorted["Confidence"].astype(str).str.contains("High", na=False).sum()))
-c5.metric("Setup ≥75", int((pd.to_numeric(df_sorted["Setup Quality"], errors="coerce") >= 75).sum()))
+# Top summary metrics — clickable filter cards
+rsi_under_40_count = int((pd.to_numeric(df_sorted["RSI"], errors="coerce") < 40).sum())
+high_conf_count = int(df_sorted["Confidence"].astype(str).str.contains("High", na=False).sum())
+setup_75_count = int((pd.to_numeric(df_sorted["Setup Quality"], errors="coerce") >= 75).sum())
+
+st.markdown("### Quick filters")
+fc1, fc2, fc3, fc4, fc5 = st.columns(5)
+with fc1:
+    st.metric("Scanned", active_tickers_scanned or len(results))
+    if st.button("Show scanned", use_container_width=True, key="filter_scanned"):
+        st.session_state.leaderboard_filter = "All"
+with fc2:
+    st.metric("Usable results", len(df_sorted))
+    if st.button("Show usable", use_container_width=True, key="filter_usable"):
+        st.session_state.leaderboard_filter = "All"
+with fc3:
+    st.metric("RSI < 40 now", rsi_under_40_count)
+    if st.button("Show RSI < 40", use_container_width=True, key="filter_rsi40"):
+        st.session_state.leaderboard_filter = "RSI < 40"
+with fc4:
+    st.metric("High-confidence patterns", high_conf_count)
+    if st.button("Show high confidence", use_container_width=True, key="filter_highconf"):
+        st.session_state.leaderboard_filter = "High confidence"
+with fc5:
+    st.metric("Setup ≥75", setup_75_count)
+    if st.button("Show setup ≥75", use_container_width=True, key="filter_setup75"):
+        st.session_state.leaderboard_filter = "Setup ≥75"
+
+active_filter = st.session_state.get("leaderboard_filter", "All")
+
+def apply_leaderboard_filter(frame: pd.DataFrame, filter_name: str) -> pd.DataFrame:
+    if filter_name == "RSI < 40":
+        return frame[pd.to_numeric(frame["RSI"], errors="coerce") < 40].copy()
+    if filter_name == "High confidence":
+        return frame[frame["Confidence"].astype(str).str.contains("High", na=False)].copy()
+    if filter_name == "Setup ≥75":
+        return frame[pd.to_numeric(frame["Setup Quality"], errors="coerce") >= 75].copy()
+    return frame.copy()
+
+filtered_df = apply_leaderboard_filter(df_sorted, active_filter).reset_index(drop=True)
+if active_filter != "All":
+    info_col, clear_col = st.columns([4, 1])
+    with info_col:
+        st.info(f"Showing **{len(filtered_df)}** tickers for filter: **{active_filter}**")
+    with clear_col:
+        if st.button("Clear filter", use_container_width=True, key="clear_leaderboard_filter"):
+            st.session_state.leaderboard_filter = "All"
+            st.rerun()
 
 st.markdown("## 🔥 Best Swing Opportunities")
-top = df_sorted.head(3)
+top = filtered_df.head(3)
 if not top.empty:
     card_cols = st.columns(len(top))
     for idx, (_, row) in enumerate(top.iterrows()):
@@ -1375,7 +1419,7 @@ with sort_c:
     view_mode = st.selectbox("View", ["Compact", "Research"], index=0, key="leaderboard_view_mode")
 
 ascending = sort_direction == "Ascending"
-display = df_sorted.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
+display = filtered_df.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
     "Ticker", "Setup Quality", "Swing Score", "Spring TF", "Spring", "Spring Score", "Attention", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
@@ -1384,6 +1428,10 @@ research_cols = compact_cols + [
     "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
+
+if display.empty:
+    st.warning("No tickers match the active quick filter. Clear the filter or rerun with different settings.")
+    st.stop()
 
 st.dataframe(
     display[show_cols],
@@ -1440,7 +1488,9 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V5.2 uses two scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (25% current RSI opportunity, 25% catalyst/news, 25% TTM Spring, 25% attention/RVOL).
+    Current V5.3 uses two scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (25% current RSI opportunity, 25% catalyst/news, 25% TTM Spring, 25% attention/RVOL).
+
+    **Setup ≥75** is the “open this in ThinkorSwim now” bucket. Stocks in the high 60s/low 70s are often the almost-there names — they may need one more thing, such as RSI slipping lower, a stronger spring turn, fresh news, or higher relative volume.
 
     This is meant to produce a **watchlist**, not a buy signal. Entries should still come from price action, VWAP, volume, support/reclaim behavior, and your 5m/15m process.
     """)
@@ -1501,6 +1551,6 @@ csv = export.to_csv(index=False)
 st.download_button(
     "Download watchlist CSV",
     data=csv,
-    file_name=f"swingit_v5_1_{datetime.date.today()}.csv",
+    file_name=f"swingit_v5_3_{datetime.date.today()}.csv",
     mime="text/csv",
 )
