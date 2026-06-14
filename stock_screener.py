@@ -1,5 +1,5 @@
 """
-SwingIt V8 — UX, Favorites, CSV, Faster Scans
+SwingIt V9 — Trading Terminal UI, Favorites, CSV, Faster Scans
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V8",
+    page_title="SwingIt V9",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -118,6 +118,27 @@ st.markdown(
     .score-num { font-size:1.12rem; font-weight:950; color:var(--accent); line-height:1.05; }
     .score-label { font-size:.58rem; color:var(--muted); text-transform:uppercase; letter-spacing:.02em; margin-top:2px; }
     .hot-meta { color:var(--muted); font-size:.69rem; margin-top:6px; line-height:1.42; }
+    .terminal-hero {
+        background:linear-gradient(135deg,#ffffff 0%,#eef4ff 100%);
+        border:1px solid var(--border);
+        border-radius:22px;
+        padding:20px 22px 18px 22px;
+        box-shadow:0 12px 28px rgba(15,23,42,.07);
+        margin-bottom:16px;
+    }
+    .terminal-title {font-size:2.05rem;font-weight:950;letter-spacing:-.04em;margin-bottom:2px;}
+    .terminal-subtitle {color:var(--muted);font-size:.92rem;margin-bottom:12px;}
+    .toolbar-label {font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:900;margin-bottom:3px;text-align:center;}
+    .toolbar-help {font-size:.72rem;color:var(--muted);text-align:center;margin-top:-4px;}
+    .stPopover>button {
+        background:#ffffff!important;
+        color:var(--text)!important;
+        border:1px solid var(--border)!important;
+        border-radius:12px!important;
+        font-weight:800!important;
+        box-shadow:0 1px 2px rgba(15,23,42,.04);
+    }
+    .run-note {font-size:.72rem;color:var(--muted);text-align:center;margin-top:3px;}
     .card-item {
         display:block;
         width:100%;
@@ -209,54 +230,79 @@ if "cancel_scan_requested" not in st.session_state:
     st.session_state.cancel_scan_requested = False
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sidebar — intentionally pared back
+# V9 top control bar — replaces the sidebar
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
-with st.sidebar:
-    st.markdown("### 🔥 SwingIt")
+csv_uploaded = None
 
+UNIVERSE_OPTIONS = [
+    "⭐ SwingIt Elite (Recommended)",
+    "⭐ Favorites",
+    "📂 CSV upload",
+    "🧠 Institutional Favorites",
+    "🚀 AI & Semiconductors",
+    "S&P 500",
+    "NASDAQ 100",
+    "Dow Jones 30",
+    "Russell 1000",
+    "Russell 3000",
+    "FXAIX / VOO Holdings",
+    "VTI Holdings",
+    "QQQM Holdings",
+    "SCHG Holdings",
+    "VGT Holdings",
+    "SMH Holdings",
+    "SOXX Holdings",
+    "Custom list",
+]
+
+UNIVERSE_HINTS = {
+    "⭐ SwingIt Elite (Recommended)": "VOO + VTI/ITOT + QQQM style quality universe",
+    "⭐ Favorites": "Your saved ticker universe",
+    "📂 CSV upload": "Upload your own ticker list",
+    "🧠 Institutional Favorites": "Large-cap names held across elite funds",
+    "🚀 AI & Semiconductors": "Growth, AI, software, and semiconductor-heavy names",
+    "S&P 500": "Large-cap U.S. stocks",
+    "NASDAQ 100": "Nasdaq-100 growth leaders",
+    "Dow Jones 30": "Blue-chip Dow names",
+    "Russell 1000": "Large and mid-cap U.S. stocks via IWB proxy",
+    "Russell 3000": "Broad U.S. market via IWV proxy",
+    "FXAIX / VOO Holdings": "S&P 500 style holdings",
+    "VTI Holdings": "Total-market style holdings via ITOT proxy",
+    "QQQM Holdings": "Nasdaq-100 ETF holdings",
+    "SCHG Holdings": "Large-cap growth ETF holdings",
+    "VGT Holdings": "Technology ETF holdings",
+    "SMH Holdings": "Semiconductor ETF holdings",
+    "SOXX Holdings": "Semiconductor ETF holdings",
+    "Custom list": "Paste tickers manually",
+}
+
+st.markdown(
+    """
+    <div class="terminal-hero">
+        <div class="terminal-title">🔥 SwingIt V9</div>
+        <div class="terminal-subtitle">A cleaner trading-terminal layout for finding RSI panic rebound candidates.</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+bar_col1, bar_col2, bar_col3 = st.columns([2.4, 1.65, 1.05], vertical_alignment="bottom")
+with bar_col1:
+    st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
     universe = st.selectbox(
         "Universe",
-        [
-            "⭐ SwingIt Elite (Recommended)",
-            "⭐ Favorites",
-            "📂 CSV upload",
-            "🧠 Institutional Favorites",
-            "🚀 AI & Semiconductors",
-            "S&P 500",
-            "NASDAQ 100",
-            "Dow Jones 30",
-            "Russell 1000",
-            "Russell 3000",
-            "FXAIX / VOO Holdings",
-            "VTI Holdings",
-            "QQQM Holdings",
-            "SCHG Holdings",
-            "VGT Holdings",
-            "SMH Holdings",
-            "SOXX Holdings",
-            "Custom list",
-        ],
-        help="Choose the group to scan. The app now scans the full selected universe by default."
+        UNIVERSE_OPTIONS,
+        index=0,
+        label_visibility="collapsed",
+        help="Choose the group to scan. The app scans the full selected universe by default.",
+        key="top_universe",
     )
-    csv_uploaded = None
-    if universe == "Custom list":
-        custom_input = st.text_area(
-            "Custom tickers",
-            placeholder="ORCL, ADBE, AMZN, MSFT",
-            height=80,
-            help="Comma, semicolon, or newline separated."
-        )
-    elif universe == "📂 CSV upload":
-        csv_uploaded = st.file_uploader(
-            "Upload ticker CSV",
-            type=["csv"],
-            help="Upload a CSV with a Ticker/Symbol column, or a one-column ticker list."
-        )
+    st.markdown(f"<div class='toolbar-help'>{html.escape(UNIVERSE_HINTS.get(universe, ''))}</div>", unsafe_allow_html=True)
 
-    st.caption("Scans the full selected universe. Larger universes may take longer.")
-
-    with st.expander("Model settings", expanded=True):
+with bar_col2:
+    st.markdown("<div class='toolbar-label'>Model Settings</div>", unsafe_allow_html=True)
+    with st.popover("⚙️ Configure", use_container_width=True):
         profit_target = st.select_slider(
             "Profit goal",
             options=[5, 8, 10, 12, 15, 20],
@@ -286,10 +332,33 @@ with st.sidebar:
             value=8,
             help="Higher = faster, but very high settings may trigger data-provider hiccups on huge universes."
         )
+    st.markdown(
+        f"<div class='toolbar-help'>Goal {profit_target}% · {bounce_window}d · TTM {spring_timeframe}</div>",
+        unsafe_allow_html=True,
+    )
 
-    run = st.button("Run Swing Scan", use_container_width=True)
-    st.caption("Watchlist engine only — use ToS for entry/exit decisions.")
+with bar_col3:
+    st.markdown("<div class='toolbar-label'>&nbsp;</div>", unsafe_allow_html=True)
+    run = st.button("🚀 Run Swing Scan", use_container_width=True)
+    st.markdown("<div class='run-note'>Use ToS for entries/exits.</div>", unsafe_allow_html=True)
 
+if universe == "Custom list":
+    custom_input = st.text_area(
+        "Custom tickers",
+        placeholder="ORCL, ADBE, AMZN, MSFT",
+        height=75,
+        help="Comma, semicolon, or newline separated.",
+        key="top_custom_tickers",
+    )
+elif universe == "📂 CSV upload":
+    csv_uploaded = st.file_uploader(
+        "📂 Upload ticker CSV",
+        type=["csv"],
+        help="Upload a CSV with a Ticker/Symbol column, or a one-column ticker list.",
+        key="top_csv_upload",
+    )
+
+st.markdown("---")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2522,8 +2591,6 @@ def mini_chart(data):
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 🔥 SwingIt V8")
-
 # When the button is clicked, run the scan once and store the result.
 if run:
     st.session_state.cancel_scan_requested = False
@@ -2594,7 +2661,7 @@ if run:
 # If no scan has been run yet, show landing state.
 if st.session_state.scan_results is None:
     st.markdown(
-        f"<div class='small-muted'>Choose a universe, then run the scan to rank 1–4 week RSI panic swing candidates.</div>",
+        f"<div class='small-muted'>Choose a universe in the top toolbar, then run the scan to rank 1–4 week RSI panic swing candidates.</div>",
         unsafe_allow_html=True,
     )
     st.divider()
@@ -2881,7 +2948,7 @@ st.dataframe(
 
 with st.expander("⭐ Favorites Manager", expanded=False):
     favs = load_favorites()
-    st.caption("Favorites are a saved universe. Choose ⭐ Favorites in the sidebar to scan only these tickers.")
+    st.caption("Favorites are a saved universe. Choose ⭐ Favorites in the Universe menu to scan only these tickers.")
     st.write(", ".join(favs) if favs else "No favorites saved yet.")
     add_text = st.text_input("Add tickers to Favorites", placeholder="ORCL, ADBE, META", key="favorites_add_text")
     fav_a, fav_b, fav_c = st.columns([1, 1, 3])
@@ -2902,7 +2969,7 @@ with st.expander("What the Swing Score means"):
     st.markdown(f"""
     **Swing Score V6.2** is a historical rebound score: *is this stock washed out, historically bouncy, and does it have a reason to move?*
 
-    **Spring Score** is separate. It uses the selected TTM timeframe from the sidebar (1D or 1H) and a TTM Squeeze-style calculation to ask: *is volatility compressed or recently released, and is momentum improving right now?* A high Spring Score is not a buy signal by itself, but it can help you prioritize which high Swing Score names are closest to becoming actionable.
+    **Spring Score** is separate. It uses the selected TTM timeframe from Model Settings (1D or 1H) and a TTM Squeeze-style calculation to ask: *is volatility compressed or recently released, and is momentum improving right now?* A high Spring Score is not a buy signal by itself, but it can help you prioritize which high Swing Score names are closest to becoming actionable.
 
     It combines:
 
