@@ -92,7 +92,7 @@ st.markdown(
         border-radius:18px;
         padding:18px 18px 14px 18px;
         box-shadow:0 8px 22px rgba(15,23,42,.06);
-        min-height:160px;
+        min-height:185px;
     }
     .hot-title { font-size:1.05rem; font-weight:900; margin-bottom:3px; }
     .hot-score { font-size:2.0rem; font-weight:950; color:var(--accent); line-height:1.1; }
@@ -152,6 +152,12 @@ with st.sidebar:
         options=[10, 15, 20, 30, 45, 60],
         value=30,
         help="How many trading days after the oversold low to measure the best closing-price bounce."
+    )
+
+    include_news = st.toggle(
+        "Add news snapshot",
+        value=True,
+        help="Adds a lightweight Yahoo Finance news read. It can slow the scan a little, so turn it off if the app feels laggy."
     )
 
     st.divider()
@@ -435,8 +441,103 @@ def analyze_rsi_rebounds(close, rsi_series, target_level=50, bounce_days=30, ove
     }
 
 
+
+NEWS_POSITIVE_WORDS = [
+    "beat", "beats", "upgrade", "upgraded", "raises", "raised", "record", "growth", "profit", "profits",
+    "strong", "bullish", "partnership", "contract", "approval", "launch", "expands", "outperform",
+    "buy", "guidance", "surge", "rallies", "rebound"
+]
+NEWS_NEGATIVE_WORDS = [
+    "miss", "misses", "downgrade", "downgraded", "cuts", "cut", "lawsuit", "probe", "investigation",
+    "weak", "bearish", "layoffs", "recall", "decline", "falls", "slumps", "warning", "loss", "losses",
+    "guidance cut", "underperform", "sell", "debt", "concern", "concerns"
+]
+
+
+def _safe_news_title(item):
+    """Yahoo/yfinance news shape has changed a few times, so keep this defensive."""
+    if not isinstance(item, dict):
+        return ""
+    if item.get("title"):
+        return str(item.get("title", ""))
+    content = item.get("content")
+    if isinstance(content, dict):
+        return str(content.get("title") or content.get("headline") or "")
+    return ""
+
+
+def _safe_news_time(item):
+    if not isinstance(item, dict):
+        return None
+    for key in ["providerPublishTime", "pubDate", "displayTime"]:
+        value = item.get(key)
+        if value:
+            try:
+                if isinstance(value, (int, float)):
+                    return datetime.datetime.fromtimestamp(value).date()
+                return pd.to_datetime(value).date()
+            except Exception:
+                pass
+    content = item.get("content")
+    if isinstance(content, dict):
+        value = content.get("pubDate") or content.get("displayTime")
+        if value:
+            try:
+                return pd.to_datetime(value).date()
+            except Exception:
+                return None
+    return None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_news_snapshot(ticker: str):
+    """Returns a simple, non-trading news label. Uses headline keywords only."""
+    try:
+        items = yf.Ticker(ticker).news or []
+        headlines = []
+        dates = []
+        for item in items[:8]:
+            title = _safe_news_title(item).strip()
+            if title:
+                headlines.append(title)
+                d = _safe_news_time(item)
+                if d:
+                    dates.append(d)
+
+        if not headlines:
+            return {"news_label": "📰 No news", "news_headline": "No recent Yahoo Finance headlines found."}
+
+        text = " ".join(headlines).lower()
+        pos = sum(1 for word in NEWS_POSITIVE_WORDS if word in text)
+        neg = sum(1 for word in NEWS_NEGATIVE_WORDS if word in text)
+
+        most_recent = max(dates) if dates else None
+        if most_recent:
+            age_days = (datetime.date.today() - most_recent).days
+            recency = "Recent" if age_days <= 7 else "Older"
+        else:
+            recency = "Recent"
+
+        if pos > neg:
+            tone = "Positive"
+            emoji = "🟢"
+        elif neg > pos:
+            tone = "Negative"
+            emoji = "🔴"
+        else:
+            tone = "Mixed/neutral"
+            emoji = "🟡"
+
+        return {
+            "news_label": f"{emoji} {recency} / {tone}",
+            "news_headline": headlines[0][:140],
+        }
+    except Exception:
+        return {"news_label": "📰 News unavailable", "news_headline": "News lookup failed or was rate-limited."}
+
+
 @st.cache_data(ttl=300, show_spinner=False)
-def compute_candidate(ticker: str, target_level: int, bounce_days: int):
+def compute_candidate(ticker: str, target_level: int, bounce_days: int, include_news_lookup: bool = True):
     try:
         raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True, threads=False)
         df = normalize_ohlcv(raw, ticker)
@@ -465,9 +566,15 @@ def compute_candidate(ticker: str, target_level: int, bounce_days: int):
         if under_30_positions:
             days_since_rsi_under_30 = len(rsi_series) - 1 - under_30_positions[-1]
 
+        news = get_news_snapshot(ticker) if include_news_lookup else {"news_label": "Off", "news_headline": "News snapshot is turned off."}
+        potential_sell_price = None
+        if rebounds.get("avg_max_bounce_pct") is not None:
+            potential_sell_price = current_price * (1 + float(rebounds["avg_max_bounce_pct"]) / 100)
+
         return {
             "ticker": ticker,
             "price": round(current_price, 2),
+            "potential_sell_price": round(float(potential_sell_price), 2) if potential_sell_price is not None else None,
             "avg_vol_20d": int(volume.tail(20).mean()) if len(volume) else None,
             "current_rsi": round(current_rsi, 1) if current_rsi is not None else None,
             "opportunity": opportunity_label(current_rsi),
@@ -481,6 +588,7 @@ def compute_candidate(ticker: str, target_level: int, bounce_days: int):
             "rsi_series": rsi_series,
             "sma50_series": sma50,
             "sma200_series": sma200,
+            **news,
             **rebounds,
         }
     except Exception:
@@ -513,6 +621,8 @@ def candidate_note(row):
 
 def hot_card(rank, row):
     medal = ["🥇", "🥈", "🥉"][rank] if rank < 3 else f"#{rank + 1}"
+    potential_price = row.get("Potential Swing Price", "—")
+    current_price = row.get("Price", "—")
     return f"""
     <div class="hot-card">
         <div class="hot-title">{medal} {row['Ticker']}</div>
@@ -520,8 +630,9 @@ def hot_card(rank, row):
         <div class="small-muted">Swing Score</div>
         <div class="hot-meta">
             {row['Opportunity']}<br>
+            Current {current_price} → Swing target {potential_price}<br>
             RSI {row['RSI']} · Potential {row['Avg Max Bounce']}<br>
-            Avg max in {row['Avg Days to Max']} days · {row['History']} history
+            Avg max in {row['Avg Days to Max']} days · {row['History']}
         </div>
     </div>
     """
@@ -619,7 +730,7 @@ status = st.empty()
 results = []
 for i, ticker in enumerate(tickers):
     status.caption(f"Checking {ticker}…")
-    candidate = compute_candidate(ticker, rsi_target, bounce_window)
+    candidate = compute_candidate(ticker, rsi_target, bounce_window, include_news)
     if candidate:
         results.append(candidate)
     progress.progress((i + 1) / len(tickers))
@@ -634,18 +745,20 @@ if not results:
 # Compact model output table.
 rows = []
 for r in results:
-    hit_rate = r.get("target_recovery_rate")
     rows.append({
         "Ticker": r["ticker"],
         "Swing Score": r["swing_score"],
         "RSI": r["current_rsi"],
         "Opportunity": r["opportunity"],
         "Price": r["price"],
+        "Potential Swing Price": r.get("potential_sell_price"),
         "Avg Max Bounce": r.get("avg_max_bounce_pct"),
         "Avg Days to Max": r.get("avg_days_to_max_bounce"),
         f"Avg Gain to RSI {rsi_target}": r.get("avg_gain_to_target_pct"),
         f"Avg Days to RSI {rsi_target}": r.get("avg_days_to_target"),
-        "History": f"{r.get('event_count', 0)} events" + (f" / {hit_rate:.0f}% hit" if hit_rate is not None else ""),
+        "History": f"{r.get('event_count', 0)} events",
+        "News": r.get("news_label"),
+        "Headline": r.get("news_headline"),
         "History Score": r.get("history_score"),
         "Opportunity Score": r.get("opportunity_score"),
         "Days Since RSI <30": r.get("days_since_rsi_under_30"),
@@ -686,10 +799,10 @@ ascending = sort_direction == "Ascending"
 display = df_sorted.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
-    "Ticker", "Swing Score", "RSI", "Opportunity", "Price", "Avg Max Bounce", "Avg Days to Max", "History"
+    "Ticker", "Swing Score", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "News"
 ]
 research_cols = compact_cols + [
-    f"Avg Gain to RSI {rsi_target}", f"Avg Days to RSI {rsi_target}", "History Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "Headline", f"Avg Gain to RSI {rsi_target}", f"Avg Days to RSI {rsi_target}", "History Score", "Opportunity Score", "Days Since RSI <30", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -702,6 +815,7 @@ st.dataframe(
         "Swing Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "RSI": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
         "Price": st.column_config.NumberColumn(format="$%.2f"),
+        "Potential Swing Price": st.column_config.NumberColumn(format="$%.2f"),
         "Avg Max Bounce": st.column_config.NumberColumn(format="%.1f%%"),
         f"Avg Gain to RSI {rsi_target}": st.column_config.NumberColumn(format="%.1f%%"),
         "Avg Drawdown After Low": st.column_config.NumberColumn(format="%.1f%%"),
@@ -716,6 +830,12 @@ with st.expander("What the Swing Score means"):
 
     **2. Historical rebound score** — what happened the last times this stock fell below RSI 30. It uses recovery frequency to RSI {rsi_target}, average gain to RSI {rsi_target}, average max bounce within {bounce_window} trading days, speed of recovery, days to max bounce, oversold depth, sample size, and a drawdown penalty.
 
+    **Panic zone** means current RSI is below 25. It is the most washed-out bucket in the model. It can be powerful, but it can also still be falling, so it should be treated as “high alert,” not an automatic buy.
+
+    **Potential Swing Price** is not a price target from an analyst. It is simply current price plus the stock’s own average max bounce after prior RSI&lt;30 events within the selected bounce window.
+
+    **News** is a lightweight headline keyword snapshot from Yahoo Finance. It is useful context, but it is not a real sentiment model. Click into the news before trusting the label.
+
     This is meant to produce a **watchlist**, not a buy signal. Entries should still come from price action, VWAP, volume, support/reclaim behavior, and your 5m/15m process.
     """)
 
@@ -725,12 +845,14 @@ selected = st.selectbox("Inspect ticker", display["Ticker"].tolist())
 detail = next((r for r in results if r["ticker"] == selected), None)
 
 if detail:
-    a, b, c, d, e = st.columns(5)
+    a, b, c, d, e, f = st.columns(6)
     a.metric("Swing Score", f"{detail['swing_score']}/100")
     b.metric("RSI", detail.get("current_rsi", "—"))
     c.metric("Price", f"${detail['price']}")
-    d.metric("Avg Max Bounce", format_pct(detail.get("avg_max_bounce_pct")))
-    e.metric("Avg Days to Max", detail.get("avg_days_to_max_bounce", "—"))
+    f_price = detail.get("potential_sell_price")
+    d.metric("Potential Swing Price", f"${f_price}" if f_price is not None else "—")
+    e.metric("Avg Max Bounce", format_pct(detail.get("avg_max_bounce_pct")))
+    f.metric("Avg Days to Max", detail.get("avg_days_to_max_bounce", "—"))
 
     tags = []
     opp = detail.get("opportunity", "")
@@ -741,9 +863,12 @@ if detail:
     else:
         tags.append(f"<span class='tag tag-blue'>{opp}</span>")
     tags.append(f"<span class='tag tag-green'>{detail.get('event_count', 0)} historical RSI&lt;30 events</span>")
-    if detail.get("target_recovery_rate") is not None:
-        tags.append(f"<span class='tag tag-blue'>{detail['target_recovery_rate']}% reached RSI {rsi_target}</span>")
+    news_label = detail.get("news_label")
+    if news_label:
+        tags.append(f"<span class='tag tag-blue'>{news_label}</span>")
     st.markdown("".join(tags), unsafe_allow_html=True)
+    if detail.get("news_headline"):
+        st.caption(f"Top headline: {detail['news_headline']}")
 
     st.plotly_chart(mini_chart(detail), use_container_width=True)
 
