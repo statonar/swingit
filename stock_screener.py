@@ -1,5 +1,5 @@
 """
-SwingIt V6.1 — Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
+SwingIt V6.2 — Rebound Stage + Universe Expansion + RSI Panic + Catalyst + TTM Spring + Attention Engine
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -28,7 +28,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V6.1",
+    page_title="SwingIt V6.2",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -198,7 +198,7 @@ if "leaderboard_filter" not in st.session_state:
 # ──────────────────────────────────────────────────────────────────────────────
 custom_input = ""
 with st.sidebar:
-    st.markdown("## 🔥 SwingIt V6.1")
+    st.markdown("## 🔥 SwingIt V6.2")
     st.markdown("*RSI rebound watchlist engine*")
     st.divider()
 
@@ -489,26 +489,33 @@ def clamp(value, lo=0, hi=100):
 
 
 def current_rsi_opportunity_score(current_rsi):
-    """Scores how close the stock is to an actionable rebound zone right now."""
+    """Scores how close the stock is to an actionable RSI rebound zone right now.
+
+    V6.2 intentionally favors the *turn* zone (roughly RSI 30–45) rather than
+    only the deepest panic. The easiest money in this strategy is often after
+    the disaster stops making new lows, not the first day RSI goes under 30.
+    """
     if current_rsi is None or pd.isna(current_rsi):
         return 0
     r = float(current_rsi)
     if r < 20:
-        return 95       # very washed out, but may still be falling
+        return 78       # powerful, but still knife-catch territory
     if r < 25:
-        return 100      # ideal panic zone
+        return 88
     if r < 30:
-        return 92
+        return 94
     if r < 35:
-        return 82
+        return 100      # early rebound zone
     if r < 40:
-        return 68
+        return 96
     if r < 45:
-        return 48
+        return 82
     if r < 50:
-        return 28
+        return 55
     if r < 55:
-        return 12
+        return 25
+    if r < 60:
+        return 10
     return 0
 
 
@@ -517,16 +524,82 @@ def opportunity_label(current_rsi):
         return "No RSI"
     r = float(current_rsi)
     if r < 25:
-        return "🔥 Panic zone"
+        return "Panic zone"
     if r < 30:
-        return "🔥 Oversold"
+        return "Oversold"
     if r < 35:
-        return "👀 Near oversold"
+        return "Early rebound zone"
     if r < 40:
-        return "Watch"
-    if r < 50:
+        return "Turn zone"
+    if r < 45:
         return "Early watch"
-    return "Already recovered"
+    if r < 50:
+        return "Watch"
+    if r < 60:
+        return "Recovered"
+    return "Extended"
+
+
+def rebound_stage_from_series(close, rsi_series, spring_score=0, days_since_under_30=None):
+    """Classify where the current RSI panic/rebound sits in its lifecycle.
+
+    This is a watchlist timing label, not an entry signal.
+    """
+    valid_rsi = rsi_series.dropna()
+    if valid_rsi.empty or close is None or len(close) < 10:
+        return 0, "⚪ No stage", "Not enough history to classify the rebound stage."
+
+    r = float(valid_rsi.iloc[-1])
+    r_prev = float(valid_rsi.iloc[-2]) if len(valid_rsi) >= 2 else r
+    r_3 = float(valid_rsi.iloc[-4]) if len(valid_rsi) >= 4 else r_prev
+    rsi_rising = r > r_prev and r > r_3
+    rsi_slope = r - r_3
+
+    close = close.dropna().astype(float)
+    current_close = float(close.iloc[-1])
+    low_10 = float(close.tail(10).min())
+    low_20 = float(close.tail(20).min()) if len(close) >= 20 else low_10
+    broke_recent_low = current_close <= low_10 * 1.01
+    lifted_from_low = current_close >= low_10 * 1.03 if low_10 else False
+    lifted_from_20d_low = current_close >= low_20 * 1.04 if low_20 else False
+
+    recent_panic = days_since_under_30 is not None and not pd.isna(days_since_under_30) and int(days_since_under_30) <= 30
+    very_recent_panic = days_since_under_30 is not None and not pd.isna(days_since_under_30) and int(days_since_under_30) <= 10
+
+    if r < 30:
+        if rsi_rising and not broke_recent_low:
+            score, label = 82, "🟡 Stabilizing"
+            note = "RSI is still under 30, but it is rising and price is no longer pressing fresh 10-day lows."
+        else:
+            score, label = 65, "🔴 Panic"
+            note = "RSI is under 30. Upside can be high, but the stock may still be falling."
+    elif r < 45 and recent_panic and rsi_rising and (lifted_from_low or spring_score >= 60):
+        score, label = 100, "🌱 Early Reversal"
+        note = "This is the preferred SwingIt zone: RSI has left panic, is rising, and the stock is starting to lift from the recent low."
+    elif r < 45 and recent_panic:
+        score, label = 82, "🟡 Stabilizing"
+        note = "RSI recently left panic but the rebound is not fully confirmed yet."
+    elif r < 55 and recent_panic and (lifted_from_20d_low or spring_score >= 70):
+        score, label = 76, "🔥 Confirmed Rebound"
+        note = "RSI has recovered and price/momentum show the rebound has started. Some of the easiest move may already be gone."
+    elif r < 60 and recent_panic:
+        score, label = 55, "✅ Recovered"
+        note = "RSI has recovered from panic. Still useful context, but the early rebound window may be fading."
+    elif r >= 60:
+        score, label = 18, "⚪ Extended"
+        note = "RSI is already strong. This may be late for a fresh 1–4 week RSI rebound entry."
+    elif r < 45:
+        score, label = 45, "👀 Watch"
+        note = "RSI is in a watchable area, but there has not been a recent RSI <30 panic event."
+    else:
+        score, label = 25, "⚪ Neutral"
+        note = "No clear RSI panic/rebound stage right now."
+
+    detail = (
+        f"{note} Current RSI {r:.1f}; 3-bar RSI change {rsi_slope:+.1f}; "
+        f"days since RSI <30: {days_since_under_30 if days_since_under_30 is not None else 'n/a'}."
+    )
+    return int(round(clamp(score))), label, detail
 
 
 def speed_score(days):
@@ -1160,21 +1233,7 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
         }
         catalyst_score = news.get("catalyst_score", 0)
         attention_score = _volume_score_from_ratio(volume_ratio)
-
-        # Swing Score = historical rebound candidate quality.
-        # Setup Quality = right-now attention/timing quality.
-        swing_score = int(round(clamp(
-            0.46 * history_score +
-            0.34 * opp_score +
-            0.14 * catalyst_score +
-            0.06 * attention_score
-        )))
-        setup_quality = int(round(clamp(
-            0.25 * opp_score +
-            0.25 * catalyst_score +
-            0.25 * spring.get("spring_score", 0) +
-            0.25 * attention_score
-        )))
+        volume_trend_score, volume_trend_label, volume_trend_reason = volume_trend_from_series(volume)
 
         # Momentum proximity flags for watchlist use, not entry signals.
         # We track both:
@@ -1208,6 +1267,27 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             except Exception:
                 rsi_oversold_start_date = None
 
+        rebound_stage_score, rebound_stage_label, rebound_stage_reason = rebound_stage_from_series(
+            close, rsi_series, spring.get("spring_score", 0), days_since_rsi_under_30
+        )
+
+        # Swing Score = historical rebound candidate quality.
+        # Setup Quality = right-now attention/timing quality.
+        swing_score = int(round(clamp(
+            0.46 * history_score +
+            0.34 * opp_score +
+            0.14 * catalyst_score +
+            0.06 * attention_score
+        )))
+        setup_quality = int(round(clamp(
+            0.20 * opp_score +
+            0.25 * rebound_stage_score +
+            0.20 * catalyst_score +
+            0.20 * spring.get("spring_score", 0) +
+            0.10 * attention_score +
+            0.05 * volume_trend_score
+        )))
+
         potential_sell_price = None
         if rebounds.get("avg_max_bounce_pct") is not None:
             potential_sell_price = current_price * (1 + float(rebounds["avg_max_bounce_pct"]) / 100)
@@ -1221,6 +1301,12 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "volume_ratio": round(float(volume_ratio), 2) if volume_ratio is not None else None,
             "attention_score": int(round(attention_score)),
             "attention_label": attention_label_from_ratio(volume_ratio),
+            "volume_trend_score": int(round(volume_trend_score)),
+            "volume_trend_label": volume_trend_label,
+            "volume_trend_reason": volume_trend_reason,
+            "rebound_stage_score": int(round(rebound_stage_score)),
+            "rebound_stage_label": rebound_stage_label,
+            "rebound_stage_reason": rebound_stage_reason,
             "setup_quality": setup_quality,
             "spring_timeframe": spring_tf,
             "spring_df": spring_df,
@@ -1345,6 +1431,31 @@ def attention_label_from_ratio(volume_ratio):
     return "⚪ RVOL n/a"
 
 
+
+def volume_trend_from_series(volume):
+    """Scores whether volume interest is building over the last week."""
+    if volume is None or len(volume.dropna()) < 15:
+        return 0, "⚪ Volume trend n/a", "Not enough volume history to calculate a volume trend."
+    v = volume.dropna().astype(float)
+    recent_5 = float(v.tail(5).mean())
+    prior_20 = float(v.iloc[-25:-5].mean()) if len(v) >= 25 else float(v.iloc[:-5].mean())
+    if not prior_20 or pd.isna(prior_20):
+        return 0, "⚪ Volume trend n/a", "Not enough prior volume history to compare against."
+    ratio = recent_5 / prior_20
+    if ratio >= 1.8:
+        score, label = 100, f"🟢 Building fast ({ratio:.1f}x)"
+    elif ratio >= 1.35:
+        score, label = 80, f"🟢 Building ({ratio:.1f}x)"
+    elif ratio >= 1.05:
+        score, label = 55, f"🟡 Slight build ({ratio:.1f}x)"
+    elif ratio >= 0.8:
+        score, label = 35, f"⚪ Flat ({ratio:.1f}x)"
+    else:
+        score, label = 10, f"🔴 Fading ({ratio:.1f}x)"
+    reason = f"Average volume over the last 5 trading days is {ratio:.2f}x the prior baseline. This asks whether interest is building, not just whether today's volume is high."
+    return int(score), label, reason
+
+
 def hot_card(rank, row):
     rank_label = f"#{rank + 1}"
     ticker = _safe_html(row.get("Ticker"))
@@ -1366,7 +1477,13 @@ def hot_card(rank, row):
     history = row.get("History", "—")
     confidence = row.get("Confidence", "—")
     opportunity = row.get("Opportunity", "—")
+    rebound_stage = row.get("Rebound Stage", "—")
+    rebound_stage_score = row.get("Rebound Stage Score", "—")
+    rebound_stage_reason = _safe_html(row.get("Rebound Stage Reason", "No rebound stage details available."))
     attention = row.get("Attention", "—")
+    volume_trend = row.get("Volume Trend", "—")
+    volume_trend_score = row.get("Volume Trend Score", "—")
+    volume_trend_reason = _safe_html(row.get("Volume Trend Reason", "No volume trend details available."))
     catalyst = row.get("Catalyst", "—")
     spring = row.get("Spring", "—")
     spring_tf = row.get("Spring TF", "—")
@@ -1395,10 +1512,12 @@ def hot_card(rank, row):
     setup_tip = f"""
         <strong>Setup Quality</strong><br>
         This asks: is this worth opening in ThinkorSwim right now?<br><br>
-        RSI opportunity: {opp_score}/100 × 25%<br>
-        Catalyst/news: {catalyst_score}/100 × 25%<br>
-        TTM Spring timing: {spring_score}/100 × 25%<br>
-        Attention/RVOL: {attention_score}/100 × 25%
+        RSI opportunity: {opp_score}/100 × 20%<br>
+        Rebound stage: {rebound_stage_score}/100 × 25%<br>
+        Catalyst/news: {catalyst_score}/100 × 20%<br>
+        TTM Spring timing: {spring_score}/100 × 20%<br>
+        Attention/RVOL: {attention_score}/100 × 10%<br>
+        Volume trend: {volume_trend_score}/100 × 5%
     """
     spring_score_tip = f"""
         <strong>Spring Score</strong><br>
@@ -1434,6 +1553,13 @@ def hot_card(rank, row):
         Avg days to max bounce: {_safe_html(avg_days)} trading days<br><br>
         This is based on prior RSI &lt;30 panic events and your selected swing window.
     """
+
+    stage_tip = f"""
+        <strong>Rebound stage</strong><br>
+        {_safe_html(clean_label(rebound_stage))}: {rebound_stage_score}/100<br><br>
+        {rebound_stage_reason}<br><br>
+        The ideal zone for this app is often Early Reversal: recently oversold, RSI rising, and price starting to lift from the low.
+    """
     history_tip = f"""
         <strong>Sample size</strong><br>
         { _safe_html(history) } were found in the lookback period.<br><br>
@@ -1444,6 +1570,11 @@ def hot_card(rank, row):
         Relative volume: {_safe_html(clean_label(attention))}<br>
         Attention score: {attention_score}/100<br><br>
         This asks whether the market is actually paying attention right now.
+    """
+    volume_trend_tip = f"""
+        <strong>Volume trend</strong><br>
+        {_safe_html(clean_label(volume_trend))}: {volume_trend_score}/100<br><br>
+        {volume_trend_reason}
     """
     news_tip = f"""
         <strong>News / catalyst</strong><br>
@@ -1477,9 +1608,11 @@ def hot_card(rank, row):
         <div class="hot-meta">
             {hover_item('Price', f'{current_price} → {potential_price}', price_tip)}
             {hover_item('RSI', f'{rsi} · {clean_label(opportunity)}', rsi_tip, dot=True)}
+            {hover_item('Stage', clean_label(rebound_stage), stage_tip, dot=True)}
             {hover_item('Potential', f'+{avg_max}% in {avg_days}d avg', bounce_tip)}
             {hover_item('History', history, history_tip)}
             {hover_item('Attention', clean_label(attention), attention_tip, dot=True)}
+            {hover_item('Volume trend', clean_label(volume_trend), volume_trend_tip, dot=True)}
             {hover_item('Spring', f'{spring_tf} · {clean_label(spring)}', spring_score_tip, dot=True)}
             {hover_item('News', clean_label(catalyst), news_tip, dot=True)}
             {hover_item('Confidence', clean_label(confidence), confidence_tip, dot=True)}
@@ -1665,6 +1798,9 @@ for r in results:
         "Setup Quality": r.get("setup_quality"),
         "RSI": r["current_rsi"],
         "Opportunity": r["opportunity"],
+        "Rebound Stage": r.get("rebound_stage_label"),
+        "Rebound Stage Score": r.get("rebound_stage_score"),
+        "Rebound Stage Reason": r.get("rebound_stage_reason"),
         "Price": r["price"],
         "Potential Swing Price": r.get("potential_sell_price"),
         "Avg Max Bounce": r.get("avg_max_bounce_pct"),
@@ -1687,6 +1823,9 @@ for r in results:
         "Catalyst Reason": r.get("catalyst_reason"),
         "Attention": r.get("attention_label"),
         "Attention Score": r.get("attention_score"),
+        "Volume Trend": r.get("volume_trend_label"),
+        "Volume Trend Score": r.get("volume_trend_score"),
+        "Volume Trend Reason": r.get("volume_trend_reason"),
         "Volume Ratio": r.get("volume_ratio"),
         "Volume Score": _volume_score_from_ratio(r.get("volume_ratio")),
         "News": r.get("news_label"),
@@ -1784,10 +1923,10 @@ ascending = sort_direction == "Ascending"
 display = filtered_df.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
-    "Ticker", "Setup Quality", "Swing Score", "Spring TF", "Spring", "Spring Score", "Attention", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
+    "Ticker", "Setup Quality", "Swing Score", "Rebound Stage", "Spring TF", "Spring", "Spring Score", "Attention", "Volume Trend", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
 ]
 research_cols = compact_cols + [
-    "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "Rebound Stage Score", "Rebound Stage Reason", "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Trend Score", "Volume Trend Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -1821,13 +1960,13 @@ st.dataframe(
 
 with st.expander("What the Swing Score means"):
     st.markdown(f"""
-    **Swing Score V5.2** is a historical rebound score: *is this stock washed out, historically bouncy, and does it have a reason to move?*
+    **Swing Score V6.2** is a historical rebound score: *is this stock washed out, historically bouncy, and does it have a reason to move?*
 
     **Spring Score** is separate. It uses the selected TTM timeframe from the sidebar (1D or 1H) and a TTM Squeeze-style calculation to ask: *is volatility compressed or recently released, and is momentum improving right now?* A high Spring Score is not a buy signal by itself, but it can help you prioritize which high Swing Score names are closest to becoming actionable.
 
     It combines:
 
-    **1. Current opportunity score** — how close the stock is to an actionable RSI rebound zone right now. RSI under 30 scores highest; RSI 30–40 is still watchable; RSI above 50 scores low because it may have already recovered.
+    **1. Current opportunity score** — how close the stock is to an actionable RSI rebound zone right now. V6.2 favors the turn zone around RSI 30–45, because the best swing entries often happen after panic starts stabilizing.
 
     **2. Historical swing outcome score** — what happened after prior RSI&lt;30 panic events. The model asks: *within {active_bounce_window} trading days after the panic low, did this stock create a tradeable bounce?*
 
@@ -1850,7 +1989,7 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V5.3 uses two scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (25% current RSI opportunity, 25% catalyst/news, 25% TTM Spring, 25% attention/RVOL).
+    Current V6.2 uses two scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (20% current RSI opportunity, 25% Rebound Stage, 20% catalyst/news, 20% TTM Spring, 10% attention/RVOL, 5% volume trend).
 
     **Setup ≥75** is the “open this in ThinkorSwim now” bucket. Stocks in the high 60s/low 70s are often the almost-there names — they may need one more thing, such as RSI slipping lower, a stronger spring turn, fresh news, or higher relative volume.
 
@@ -1865,12 +2004,12 @@ if detail:
     a, b, c, d, e, f, g = st.columns(7)
     a.metric("Setup Quality", f"{detail.get('setup_quality', 0)}/100")
     b.metric("Swing Score", f"{detail['swing_score']}/100")
-    c.metric("Spring Score", f"{detail.get('spring_score', 0)}/100")
-    d.metric("RSI", detail.get("current_rsi", "—"))
-    e.metric("Price", f"${detail['price']}")
+    c.metric("Stage", clean_label(detail.get("rebound_stage_label", "—")))
+    d.metric("Spring Score", f"{detail.get('spring_score', 0)}/100")
+    e.metric("RSI", detail.get("current_rsi", "—"))
+    f.metric("Price", f"${detail['price']}")
     f_price = detail.get("potential_sell_price")
-    f.metric("Potential Swing Price", f"${f_price}" if f_price is not None else "—")
-    g.metric("Attention", detail.get("attention_label", "—"))
+    g.metric("Potential Swing Price", f"${f_price}" if f_price is not None else "—")
 
     tags = []
     opp = detail.get("opportunity", "")
@@ -1880,17 +2019,25 @@ if detail:
         tags.append(f"<span class='tag tag-amber'>{opp}</span>")
     else:
         tags.append(f"<span class='tag tag-blue'>{opp}</span>")
+    if detail.get("rebound_stage_label"):
+        tags.append(f"<span class='tag tag-green'>Stage: {detail.get('rebound_stage_label')} · {detail.get('rebound_stage_score', 0)}/100</span>")
     tags.append(f"<span class='tag tag-green'>{detail.get('event_count', 0)} historical RSI&lt;30 events</span>")
     if detail.get("confidence_label"):
         tags.append(f"<span class='tag tag-blue'>{detail.get('confidence_label')}</span>")
     tags.append(f"<span class='tag tag-blue'>Setup Quality {detail.get('setup_quality', 0)}/100</span>")
     if detail.get("attention_label"):
         tags.append(f"<span class='tag tag-blue'>{detail.get('attention_label')}</span>")
+    if detail.get("volume_trend_label"):
+        tags.append(f"<span class='tag tag-blue'>Volume trend: {detail.get('volume_trend_label')}</span>")
     if detail.get("spring_label"):
         tags.append(f"<span class='tag tag-amber'>TTM {detail.get('spring_timeframe', '1D')} · {detail.get('spring_label')} · {detail.get('spring_score', 0)}/100</span>")
     if detail.get("catalyst_label"):
         tags.append(f"<span class='tag tag-blue'>{detail.get('catalyst_label')} · {detail.get('catalyst_score', 0)}/100</span>")
     st.markdown("".join(tags), unsafe_allow_html=True)
+    if detail.get("rebound_stage_reason"):
+        st.caption(f"Rebound stage: {detail['rebound_stage_reason']}")
+    if detail.get("volume_trend_reason"):
+        st.caption(f"Volume trend: {detail['volume_trend_reason']}")
     if detail.get("spring_reason"):
         st.caption(f"TTM spring read ({detail.get('spring_timeframe', '1D')}): {detail['spring_reason']}")
     if detail.get("catalyst_reason"):
