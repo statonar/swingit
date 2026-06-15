@@ -4382,7 +4382,7 @@ def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def compute_portfolio_deep(ticker: str, entry_price: float, entry_date: str, goal_pct: float):
-    candidate = compute_candidate(ticker, goal_pct or 8, 30, True, "1D", force_deep=True)
+    candidate = compute_candidate(ticker, goal_pct or 8, 30, True, "1D")
     if not candidate:
         return None
     fourh = _download_intraday_spring(ticker, "4H")
