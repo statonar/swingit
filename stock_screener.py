@@ -4916,32 +4916,56 @@ def macd_entry_state(close: pd.Series):
 
 
 def ema_entry_state(close: pd.Series):
+    """Early momentum read using EMA 9/15 compression.
+
+    Entry Hunter should not require the 9 EMA to already be above the 15 EMA,
+    because that is often late. This scores whether the 9 EMA is closing the
+    gap toward the 15 EMA, while still giving credit for a fresh cross.
+    """
     try:
         c = close.dropna().astype(float)
         if len(c) < 25:
-            return 0, "⚪ Not enough EMA data", "EMA needs more daily history."
+            return 0, "⚪ Not enough EMA data", "EMA compression needs more daily history."
         ema9 = ta.trend.EMAIndicator(c, window=9).ema_indicator()
         ema15 = ta.trend.EMAIndicator(c, window=15).ema_indicator()
         diff = (ema9 - ema15).dropna()
-        if len(diff) < 5:
-            return 0, "⚪ EMA unavailable", "EMA signal is unavailable."
+        if len(diff) < 6:
+            return 0, "⚪ EMA unavailable", "EMA compression signal is unavailable."
+
         now = float(diff.iloc[-1])
         prev = float(diff.iloc[-2])
-        crossed_recent = any(float(diff.iloc[-k-1]) <= 0 and float(diff.iloc[-k]) > 0 for k in range(1, min(4, len(diff))))
-        improving_3 = float(diff.iloc[-1]) > float(diff.iloc[-2]) > float(diff.iloc[-3]) if len(diff) >= 3 else False
+        prev3 = float(diff.iloc[-4]) if len(diff) >= 4 else prev
         price = float(c.iloc[-1])
-        near_cross = now <= 0 and abs(now) / max(price, 1) < 0.01 and now > prev
+        price = max(price, 1)
+
+        # Negative gap means EMA9 is below EMA15. We want that gap to shrink.
+        gap_now_pct = abs(now) / price * 100.0
+        gap_prev_pct = abs(prev) / price * 100.0
+        gap_prev3_pct = abs(prev3) / price * 100.0
+        crossed_recent = any(float(diff.iloc[-k-1]) <= 0 and float(diff.iloc[-k]) > 0 for k in range(1, min(5, len(diff))))
+        closing_1 = now > prev
+        closing_3 = now > prev and prev > float(diff.iloc[-3]) if len(diff) >= 3 else closing_1
+        gap_shrunk_meaningfully = now <= 0 and gap_now_pct < gap_prev3_pct * 0.75 and closing_1
+        very_close = now <= 0 and gap_now_pct <= 0.75 and closing_1
+        close_enough = now <= 0 and gap_now_pct <= 1.5 and closing_1
+
+        if gap_shrunk_meaningfully and very_close and closing_3:
+            return 100, "🟢 EMA gap closing fast", f"EMA 9 is still below EMA 15, but the gap has compressed to {gap_now_pct:.2f}% and is closing quickly."
         if crossed_recent:
-            return 100, "🟢 Fresh 9/15 EMA cross", "The 9 EMA crossed above the 15 EMA within the last few daily bars."
-        if near_cross and improving_3:
-            return 85, "🟢 EMA nearly crossed", "The 9 EMA is closing in on the 15 EMA and improving."
-        if now > 0 and improving_3:
-            return 75, "🟡 EMA bullish and improving", "The 9 EMA is above the 15 EMA and still improving."
+            return 88, "🟢 Fresh EMA cross", "EMA 9 recently crossed above EMA 15. This confirms the turn, though it may be slightly later than compression."
+        if gap_shrunk_meaningfully:
+            return 85, "🟢 EMA compression", f"EMA 9 is closing the gap on EMA 15. Gap moved from about {gap_prev3_pct:.2f}% to {gap_now_pct:.2f}%."
+        if close_enough and closing_3:
+            return 75, "🟡 EMA close and improving", f"EMA 9 is near EMA 15 with a {gap_now_pct:.2f}% gap and improving."
+        if now > 0 and closing_1:
+            return 70, "🟡 EMA bullish", "EMA 9 is above EMA 15 and still improving, but the earlier entry may have already appeared."
         if now > 0:
-            return 60, "🟡 EMA bullish", "The 9 EMA is above the 15 EMA, but the cross may not be fresh."
-        return 20, "🔴 EMA not ready", "The 9 EMA has not started reclaiming the 15 EMA yet."
+            return 55, "🟡 EMA crossed already", "EMA 9 is above EMA 15, but the crossover no longer looks fresh."
+        if closing_1:
+            return 45, "🟠 EMA starting to close", f"EMA 9 is below EMA 15, but the gap is starting to shrink ({gap_now_pct:.2f}%)."
+        return 15, "🔴 EMA gap widening", "EMA 9 is moving farther below EMA 15, so short-term price structure is not improving yet."
     except Exception:
-        return 0, "⚪ EMA unavailable", "EMA calculation failed."
+        return 0, "⚪ EMA unavailable", "EMA compression calculation failed."
 
 
 def entry_ttm_is_rebounding(spring: dict) -> bool:
@@ -5077,12 +5101,12 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
 
         entry_score = int(round(clamp(
             0.25 * fourh_score +
-            0.20 * oneh_score +
-            0.25 * panic_quality +
+            0.15 * oneh_score +
+            0.30 * panic_quality +
             0.15 * rsi_score +
-            0.07 * ema_score +
-            0.05 * macd_score +
-            0.03 * daily_bonus
+            0.10 * ema_score +
+            0.03 * macd_score +
+            0.02 * daily_bonus
         )))
         if entry_score < 70:
             return None
@@ -5105,10 +5129,12 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
             setup_age_bits.append("MACD crossed recently")
         elif "nearly" in macd_label.lower():
             setup_age_bits.append("MACD nearly crossed")
-        if "Fresh" in ema_label:
+        if "gap closing fast" in ema_label.lower() or "compression" in ema_label.lower():
+            setup_age_bits.append("EMA gap compressing")
+        elif "Fresh" in ema_label:
             setup_age_bits.append("EMA crossed recently")
-        elif "nearly" in ema_label.lower():
-            setup_age_bits.append("EMA nearly crossed")
+        elif "close" in ema_label.lower():
+            setup_age_bits.append("EMA gap closing")
         setup_age_bits.append(f"1H trigger: {clean_label(oneh_label)}")
         setup_age_bits.append(f"4H trigger: {clean_label(fourh_label)}")
         setup_age_bits.append(f"1D spring: {clean_label(daily_label)}")
@@ -5116,7 +5142,7 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         why = (
             f"-{drop_pct:.1f}% panic drop in {drop_days or '?'} trading days; RSI recovered from {rsi_low_recent:.1f} to {current_rsi:.1f}; "
             f"1H {clean_label(oneh_label)}; 4H {clean_label(fourh_label)}; 1D {clean_label(daily_label)}; "
-            f"{clean_label(macd_label)}; {clean_label(ema_label)}."
+            f"{clean_label(ema_label)}; {clean_label(macd_label)}."
         )
 
         result.update({
@@ -5161,7 +5187,7 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
 
 def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict | None = None):
     st.markdown("## ⚡ Entry Hunter")
-    st.caption("A picky weekly-entry workspace: fast panic drop → RSI recovery → 1H+4H TTM rebound → MACD/EMA turn. Maximum 5 elite entries.")
+    st.caption("A picky weekly-entry workspace: fast panic drop → RSI recovery → 1H+4H TTM rebound → EMA compression/MACD confirmation. Maximum 5 elite entries.")
 
     if not results:
         st.info("🦜 The kingdom is quiet. No elite Entry Hunter setups passed today. That can be the correct answer — patience protects the account.")
@@ -5193,7 +5219,7 @@ def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict 
             c3.metric("1H TTM", f"{int(_to_float(r.get('entry_1h_score'),0))}", clean_label(r.get('entry_1h_label','—'))[:20])
             c4.metric("4H TTM", f"{int(_to_float(r.get('entry_4h_score'),0))}", clean_label(r.get('entry_4h_label','—'))[:20])
             c5.metric("1D TTM", f"{int(_to_float(r.get('entry_1d_score'),0))}", clean_label(r.get('entry_1d_label','—'))[:20])
-            c6.metric("MACD/EMA", f"{int(_to_float(r.get('entry_macd_score'),0))}/{int(_to_float(r.get('entry_ema_score'),0))}", f"{clean_label(r.get('entry_macd_label','—'))[:10]} · {clean_label(r.get('entry_ema_label','—'))[:10]}")
+            c6.metric("EMA/MACD", f"{int(_to_float(r.get('entry_macd_score'),0))}/{int(_to_float(r.get('entry_ema_score'),0))}", f"{clean_label(r.get('entry_ema_label','—'))[:10]} · {clean_label(r.get('entry_macd_label','—'))[:10]}")
 
             st.markdown("#### Market Read")
             event = r.get("event_type") or "No major event detected"
@@ -5252,7 +5278,7 @@ if st.session_state.get("workspace_selector") == "⚡ Entry Hunter":
         with st.container(border=True):
             st.markdown("## ⚡ Entry Hunter")
             st.markdown(
-                "Find the few stocks that match your actual weekly-entry recipe: $2B+ market cap, a fast 5–25% panic drop, RSI recovery from oversold, MACD/EMA turn, and 1H + 4H TTM rebound triggers."
+                "Find the few stocks that match your actual weekly-entry recipe: $2B+ market cap, a fast 5–25% panic drop, RSI recovery from oversold, EMA/MACD turn, and 1H + 4H TTM rebound triggers."
             )
             st.caption("Choose a universe above, then click Run Swing Scan. This workspace is intentionally picky; zero results can be the correct answer.")
         st.stop()
