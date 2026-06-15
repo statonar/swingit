@@ -4886,34 +4886,58 @@ def recent_fast_drop(close: pd.Series, lookback: int = 12, max_days: int = 7):
 
 
 def macd_entry_state(close: pd.Series):
+    """Early MACD momentum read using convergence instead of requiring crossover.
+
+    Entry Hunter should detect the turn *before* MACD fully crosses. A fresh cross
+    is still useful, but the preferred early signal is the MACD histogram/diff
+    moving upward toward the signal line with the gap shrinking.
+    """
     try:
         c = close.dropna().astype(float)
         if len(c) < 40:
-            return 0, "⚪ Not enough MACD data", "MACD needs more daily history."
+            return 0, "⚪ Not enough MACD data", "MACD convergence needs more daily history."
         macd_ind = ta.trend.MACD(c)
         macd = macd_ind.macd()
         sig = macd_ind.macd_signal()
         diff = (macd - sig).dropna()
-        if len(diff) < 5:
+        if len(diff) < 6:
             return 0, "⚪ Not enough MACD data", "MACD signal is unavailable."
+
         now = float(diff.iloc[-1])
         prev = float(diff.iloc[-2])
-        crossed_recent = any(float(diff.iloc[-k-1]) <= 0 and float(diff.iloc[-k]) > 0 for k in range(1, min(4, len(diff))))
-        improving_3 = float(diff.iloc[-1]) > float(diff.iloc[-2]) > float(diff.iloc[-3]) if len(diff) >= 3 else False
-        price = float(c.iloc[-1])
-        near_cross = now <= 0 and abs(now) / max(price, 1) < 0.006 and now > prev
-        if crossed_recent:
-            return 100, "🟢 Fresh bullish MACD cross", "MACD crossed bullish within the last few daily bars."
-        if near_cross and improving_3:
-            return 85, "🟢 MACD nearly crossed", "MACD is still slightly negative but converging upward quickly."
-        if improving_3:
-            return 65, "🟡 MACD improving", "MACD momentum is improving but has not reached a clean trigger."
-        if now > 0:
-            return 55, "🟡 MACD positive", "MACD is positive, but the freshest crossover may have already passed."
-        return 20, "🔴 MACD weak", "MACD is not converging upward yet."
-    except Exception:
-        return 0, "⚪ MACD unavailable", "MACD calculation failed."
+        prev2 = float(diff.iloc[-3])
+        prev3 = float(diff.iloc[-4]) if len(diff) >= 4 else prev2
+        price = max(float(c.iloc[-1]), 1.0)
 
+        crossed_recent = any(float(diff.iloc[-k-1]) <= 0 and float(diff.iloc[-k]) > 0 for k in range(1, min(5, len(diff))))
+        improving_1 = now > prev
+        improving_3 = now > prev > prev2 if len(diff) >= 3 else improving_1
+        improving_4 = now > prev > prev2 > prev3 if len(diff) >= 4 else improving_3
+
+        # If MACD is below signal, gap is negative. We want that negative gap to shrink.
+        gap_now_pct = abs(now) / price * 100.0
+        gap_prev3_pct = abs(prev3) / price * 100.0
+        gap_shrunk_meaningfully = now <= 0 and improving_1 and gap_now_pct < gap_prev3_pct * 0.75
+        very_close = now <= 0 and gap_now_pct <= 0.35 and improving_1
+        close_enough = now <= 0 and gap_now_pct <= 0.75 and improving_1
+
+        if gap_shrunk_meaningfully and very_close and improving_3:
+            return 100, "🟢 MACD converging fast", f"MACD is still below the signal line, but the gap has compressed to {gap_now_pct:.2f}% and is closing quickly."
+        if gap_shrunk_meaningfully and improving_3:
+            return 88, "🟢 MACD convergence", f"MACD is closing the gap toward the signal line. Gap moved from about {gap_prev3_pct:.2f}% to {gap_now_pct:.2f}%."
+        if crossed_recent:
+            return 84, "🟢 Fresh bullish MACD cross", "MACD recently crossed bullish. This confirms the turn, though it may be slightly later than convergence."
+        if close_enough and improving_3:
+            return 76, "🟡 MACD close and improving", f"MACD is near crossover with a {gap_now_pct:.2f}% gap and improving."
+        if improving_4:
+            return 68, "🟡 MACD curling up", "MACD momentum has improved for several bars but has not reached a clean near-cross yet."
+        if improving_1:
+            return 52, "🟠 MACD starting to improve", "MACD is starting to curl upward, but the convergence is still early."
+        if now > 0:
+            return 50, "🟡 MACD positive already", "MACD is above the signal line, but the fresh early-entry moment may have passed."
+        return 18, "🔴 MACD widening", "MACD is not converging upward yet."
+    except Exception:
+        return 0, "⚪ MACD unavailable", "MACD convergence calculation failed."
 
 def ema_entry_state(close: pd.Series):
     """Early momentum read using EMA 9/15 compression.
@@ -5128,7 +5152,7 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         if "Fresh" in macd_label:
             setup_age_bits.append("MACD crossed recently")
         elif "nearly" in macd_label.lower():
-            setup_age_bits.append("MACD nearly crossed")
+            setup_age_bits.append("MACD converging")
         if "gap closing fast" in ema_label.lower() or "compression" in ema_label.lower():
             setup_age_bits.append("EMA gap compressing")
         elif "Fresh" in ema_label:
@@ -5278,7 +5302,7 @@ if st.session_state.get("workspace_selector") == "⚡ Entry Hunter":
         with st.container(border=True):
             st.markdown("## ⚡ Entry Hunter")
             st.markdown(
-                "Find the few stocks that match your actual weekly-entry recipe: $2B+ market cap, a fast 5–25% panic drop, RSI recovery from oversold, EMA/MACD turn, and 1H + 4H TTM rebound triggers."
+                "Find the few stocks that match your actual weekly-entry recipe: $2B+ market cap, a fast 5–25% panic drop, RSI recovery from oversold, EMA/MACD convergence, and 1H + 4H TTM rebound triggers."
             )
             st.caption("Choose a universe above, then click Run Swing Scan. This workspace is intentionally picky; zero results can be the correct answer.")
         st.stop()
