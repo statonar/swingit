@@ -4643,6 +4643,39 @@ def compute_portfolio_deep(ticker: str, entry_price: float, entry_date: str, goa
         fallback_used = bool(candidate)
     if not candidate:
         return None
+
+    # Portfolio target should always be based on YOUR trade plan, not the scanner's
+    # conservative RSI-cycle target. Scanner targets estimate a possible setup;
+    # portfolio targets manage an active position.
+    try:
+        goal = float(goal_pct or 8)
+        entry = float(entry_price or 0)
+        current_price = _to_float(candidate.get("price"), 0)
+        if entry > 0:
+            portfolio_target = entry * (1 + goal / 100.0)
+            target_gain_from_current = ((portfolio_target - current_price) / current_price * 100.0) if current_price > 0 else None
+            move_completed = clamp(((current_price - entry) / (portfolio_target - entry)) * 100.0) if portfolio_target > entry else 0
+            remaining = clamp(100.0 - move_completed)
+
+            candidate["potential_sell_price"] = round(float(portfolio_target), 2)
+            candidate["target_gain_pct_from_current"] = round(float(target_gain_from_current), 2) if target_gain_from_current is not None else None
+            candidate["target_bounce_pct_from_low"] = None
+            candidate["target_reason"] = f"Portfolio target: entry price (${entry:.2f}) plus your selected {goal:.1f}% profit goal."
+            candidate["target_confidence"] = "Trade plan"
+            candidate["target_method"] = "Entry + profit goal"
+            candidate["opportunity_remaining_pct"] = round(float(remaining), 1)
+            candidate["opportunity_remaining_score"] = int(round(remaining))
+            candidate["move_completed_pct"] = round(float(move_completed), 1)
+            candidate["opportunity_remaining_label"] = (
+                "🟢 Early" if remaining >= 70 else
+                "🟡 Developing" if remaining >= 40 else
+                "🟠 Late" if remaining >= 20 else
+                "🔴 Extended"
+            )
+            candidate["cycle_target_price"] = round(float(portfolio_target), 2)
+    except Exception:
+        pass
+
     fourh = _download_intraday_spring(ticker, "4H")
     oneh = _download_intraday_spring(ticker, "1H")
     analysis = portfolio_exit_analysis(candidate, {"Entry Price": entry_price, "Entry Date": entry_date, "Profit Goal %": goal_pct, "Entry Thesis": entry_thesis}, fourh, oneh)
