@@ -1,5 +1,5 @@
 """
-SwingIt V11.2 — Analyst Verdict
+SwingIt V11.2.1.1 — Analyst Verdict Calibration
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -3321,7 +3321,13 @@ def _numeric_from_row(row, key, default=0):
 
 
 def analyst_verdict_from_row(row):
-    """V11.2: translate all SwingIt evidence into an analyst-style action label."""
+    """V11.2.1: translate all SwingIt evidence into a calibrated analyst-style action label.
+
+    Calibration goal:
+    - ORCL-style false-panic setups should be eligible for Prime Candidate.
+    - A weak 1D spring alone should NOT mean Avoid.
+    - Avoid should be rare and reserved for clear fundamental/news damage or red flags.
+    """
     market_read = clean_label(row.get("Analyst Verdict", "")).lower()
     event_type = clean_label(row.get("Event Type", "")).lower()
     red_flags = clean_label(row.get("Red Flags", "")).lower()
@@ -3329,6 +3335,7 @@ def analyst_verdict_from_row(row):
     trigger_4h = clean_label(row.get("4H Trigger", "")).lower()
     stabilization = clean_label(row.get("Stabilization", "")).lower()
     rebound_stage = clean_label(row.get("Rebound Stage", "")).lower()
+    news_note = clean_label(row.get("Analyst Note", "")).lower()
 
     swing = _numeric_from_row(row, "Swing Score")
     setup = _numeric_from_row(row, "Setup Quality")
@@ -3341,35 +3348,64 @@ def analyst_verdict_from_row(row):
     confidence_score = _numeric_from_row(row, "Confidence Score")
     rsi = _numeric_from_row(row, "RSI", 50)
 
-    has_red_flag = any(x in red_flags for x in ["red flag", "capped", "fundamental damage", "broken", "avoid"])
-    bad_story = any(x in market_read for x in ["fundamental damage", "broken", "appropriate", "justified"])
-    too_late = remaining not in [None, "—"] and remaining < 25
+    # Only true story-breaking items should produce Avoid.
+    hard_red_flag_terms = [
+        "fraud", "sec investigation", "accounting", "bankruptcy", "liquidity",
+        "going concern", "guidance cut", "cuts guidance", "lowered guidance",
+        "suspension", "delisting", "criminal", "lawsuit risk"
+    ]
+    has_hard_red_flag = any(x in red_flags for x in hard_red_flag_terms) or any(x in news_note for x in hard_red_flag_terms)
+    fundamental_damage = any(x in market_read for x in ["fundamental damage", "broken"]) or any(x in event_type for x in ["negative business event"])
+    justified_risk = "justified" in market_read and overreaction < 70 and news_score < 55
+
+    false_panic = any(x in market_read for x in ["false panic", "overdone", "possible overreaction"])
+    positive_story = any(x in event_type for x in ["positive business event", "mixed event", "non-fundamental"])
+
+    too_late = remaining < 25
     extended = ("extended" in rebound_stage) or rsi >= 63
     short_turn = trigger_score >= 65 or any(x in trigger_4h for x in ["fired up", "improving", "early turn", "loaded"])
-    stable = stab_score >= 65 or any(x in stabilization for x in ["stabilizing", "high", "strong"])
-    false_panic = any(x in market_read for x in ["false panic", "overdone", "possible overreaction"])
-    daily_ok = not any(x in daily_spring for x in ["accelerating down", "fired down"])
+    stable = stab_score >= 65 or any(x in stabilization for x in ["stabilizing", "high", "strong", "possible stabilization"])
+    daily_bad = any(x in daily_spring for x in ["accelerating down", "fired down"])
+    daily_ok = not daily_bad or spring_score >= 35
 
-    if has_red_flag or (bad_story and overreaction < 65):
+    # ORCL-style setup: good/mixed story + ugly selloff + enough room left + at least some timing evidence.
+    prime_like_orcl = (
+        (false_panic or positive_story or news_score >= 65)
+        and overreaction >= 65
+        and remaining >= 50
+        and setup >= 55
+        and (stable or short_turn)
+        and not has_hard_red_flag
+        and not (fundamental_damage and news_score < 55)
+    )
+
+    if has_hard_red_flag or (fundamental_damage and news_score < 45 and overreaction < 70):
         verdict = "🚨 Avoid"
-        confidence = "High" if news_score >= 60 or has_red_flag else "Moderate"
-        summary = "The decline appears tied to meaningful business or headline risk. Technical rebound signals may be less reliable until the story improves."
+        confidence = "High" if has_hard_red_flag or news_score >= 50 else "Moderate"
+        summary = "The decline appears tied to meaningful business or headline damage. Treat technical rebound signals cautiously until the underlying story improves."
     elif too_late or extended:
         verdict = "😴 Recovery Underway"
         confidence = "High" if remaining < 20 else "Moderate"
         summary = "The rebound has already progressed substantially. Momentum may still be positive, but much of the usual historical opportunity appears captured."
-    elif false_panic and overreaction >= 70 and remaining >= 50 and stable and short_turn and daily_ok and setup >= 60:
+    elif prime_like_orcl and (short_turn or stab_score >= 75) and not (daily_bad and trigger_score < 70):
         verdict = "🔥 Prime Candidate"
-        confidence = "High" if confidence_score >= 70 and news_score >= 60 else "Moderate"
-        summary = "The selloff looks potentially overdone, selling pressure is stabilizing, and short-term buyers are beginning to appear while meaningful upside may remain."
-    elif (overreaction >= 60 or swing >= 65) and remaining >= 40 and (stable or short_turn):
+        confidence = "High" if confidence_score >= 70 and news_score >= 60 and (stable and short_turn) else "Moderate"
+        summary = "This has the ORCL-style profile we like: the selloff may be overdone, the opportunity is still meaningful, and stabilization or lower-timeframe buying is beginning to show."
+    elif (false_panic or overreaction >= 60 or swing >= 65 or setup >= 65) and remaining >= 35 and (stable or short_turn or rsi <= 40):
         verdict = "👀 Watch Closely"
-        confidence = "High" if confidence_score >= 70 else "Moderate"
-        summary = "The stock is showing signs that the panic may be ending, but one or more confirmations are still missing before it becomes a high-conviction entry."
-    elif overreaction >= 55 or swing >= 60 or rsi <= 35:
+        confidence = "High" if confidence_score >= 70 and (stable or short_turn) else "Moderate"
+        if daily_bad and short_turn:
+            summary = "The short-term setup is improving while the daily trend is still damaged. This is worth watching closely, but daily confirmation is not here yet."
+        else:
+            summary = "The panic may be ending and the setup has enough remaining upside to deserve attention, but one or more confirmations are still missing."
+    elif (overreaction >= 55 or swing >= 60 or setup >= 55 or rsi <= 35) and remaining >= 30:
         verdict = "⏳ Too Early"
         confidence = "Moderate"
-        summary = "The idea is interesting, but the timing is still immature. Let the selling pressure exhaust and wait for stabilization or a lower-timeframe trigger."
+        summary = "The idea is interesting, but timing is still immature. Let selling pressure exhaust and wait for stabilization or a cleaner 4H trigger."
+    elif justified_risk:
+        verdict = "🚨 Avoid"
+        confidence = "Moderate"
+        summary = "The market's reaction may be justified by the headline or business context. This is not a clean false-panic setup yet."
     else:
         verdict = "⚪ No Clear Edge"
         confidence = "Low"
@@ -3378,10 +3414,10 @@ def analyst_verdict_from_row(row):
     details = (
         f"Swing: {swing:.0f}/100 · Setup: {setup:.0f}/100 · Overreaction: {overreaction:.0f}/100 · "
         f"Stabilization: {stab_score:.0f}/100 · 4H Trigger: {trigger_score:.0f}/100 · "
-        f"Opportunity remaining: {remaining:.0f}% · Market Read: {clean_label(row.get('Analyst Verdict', '—'))}"
+        f"Daily Spring: {spring_score:.0f}/100 · Opportunity remaining: {remaining:.0f}% · "
+        f"Market Read: {clean_label(row.get('Analyst Verdict', '—'))}"
     )
     return verdict, confidence, summary, details
-
 
 def _volume_score_from_ratio(volume_ratio):
     vr = volume_ratio or 0
