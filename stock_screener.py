@@ -1,5 +1,5 @@
 """
-SwingIt V10.5 — Universe Accuracy + Profile Defaults + Morning Report
+SwingIt V10.6 — Universe Accuracy + Profile Defaults + Morning Report
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V10.5",
+    page_title="SwingIt V10.6",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -285,6 +285,7 @@ APP_VIEW_BY_OPTIONS = [
     "🧠 Highest Confidence",
     "🚀 Maximum Upside",
     "😱 Overreaction",
+    "🧊 Stabilizing Panics",
 ]
 
 APP_CANDIDATE_GATE_OPTIONS = ["Balanced", "Strict", "Loose"]
@@ -375,7 +376,7 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V10.5</div>
+            <div class="terminal-title">🔥 SwingIt V10.6</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
@@ -1577,6 +1578,173 @@ def rebound_stage_from_series(close, rsi_series, spring_score=0, days_since_unde
     return int(round(clamp(score))), label, detail
 
 
+
+
+def resample_to_4h(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert hourly OHLCV data to approximate 4-hour bars for tactical TTM trigger checks."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    if not isinstance(out.index, pd.DatetimeIndex):
+        try:
+            out.index = pd.to_datetime(out.index)
+        except Exception:
+            return pd.DataFrame()
+    agg = {
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum",
+    }
+    try:
+        fourh = out.resample("4h").agg(agg).dropna(subset=["Open", "High", "Low", "Close"])
+        return fourh
+    except Exception:
+        return pd.DataFrame()
+
+
+def compute_stabilization_score(close, volume, rsi_series, cycle_low_price=None, cycle_low_date=None, days_since_under_30=None):
+    """Score whether a panic selloff appears to have stopped falling before a full reversal.
+
+    This is intentionally different from Spring: stabilization is about price no longer
+    making new lows, RSI improving, candle ranges calming, and volume staying constructive.
+    """
+    empty = {
+        "stabilization_score": 0,
+        "stabilization_label": "⚪ No stabilization data",
+        "stabilization_reason": "Not enough recent price/RSI data to judge stabilization.",
+        "days_since_panic_low": None,
+        "distance_from_panic_low_pct": None,
+        "new_low_last_3d": None,
+    }
+    try:
+        close = close.dropna().astype(float)
+        volume = volume.dropna().astype(float) if volume is not None else pd.Series(dtype=float)
+        valid_rsi = rsi_series.dropna().astype(float)
+    except Exception:
+        return empty
+    if len(close) < 10 or valid_rsi.empty:
+        return empty
+
+    current = float(close.iloc[-1])
+    rsi_now = float(valid_rsi.iloc[-1])
+    rsi_low_10 = float(valid_rsi.tail(10).min()) if len(valid_rsi) >= 10 else float(valid_rsi.min())
+    rsi_3ago = float(valid_rsi.iloc[-4]) if len(valid_rsi) >= 4 else float(valid_rsi.iloc[0])
+    rsi_improvement = rsi_now - rsi_low_10
+    rsi_slope = rsi_now - rsi_3ago
+
+    # Anchor on the RSI-panic cycle low if available, otherwise recent 10-day low.
+    low_price = None
+    try:
+        if cycle_low_price is not None and not pd.isna(cycle_low_price):
+            low_price = float(cycle_low_price)
+    except Exception:
+        low_price = None
+    if not low_price or low_price <= 0:
+        low_price = float(close.tail(10).min())
+
+    distance_from_low = ((current - low_price) / low_price) * 100.0 if low_price else None
+    recent_low_3 = float(close.tail(3).min())
+    prior_low_7 = float(close.iloc[-10:-3].min()) if len(close) >= 10 else float(close.tail(10).min())
+    new_low_last_3d = recent_low_3 < prior_low_7 * 0.995
+    no_new_low_score = 0 if new_low_last_3d else 100
+
+    # Days since panic low date if supplied; otherwise use days since RSI<30.
+    days_since_low = None
+    if cycle_low_date not in [None, "", "—"]:
+        try:
+            dt = pd.to_datetime(cycle_low_date)
+            # Count trading bars after the cycle low date in available close series.
+            days_since_low = int((close.index > dt).sum())
+        except Exception:
+            days_since_low = None
+    if days_since_low is None and days_since_under_30 is not None and not pd.isna(days_since_under_30):
+        try:
+            days_since_low = int(days_since_under_30)
+        except Exception:
+            days_since_low = None
+
+    # Ideal stabilization window: 2-10 bars after the panic low. Too new = knife; too old = already resolving.
+    if days_since_low is None:
+        days_score = 45
+    elif days_since_low < 2:
+        days_score = 20
+    elif days_since_low <= 7:
+        days_score = 100
+    elif days_since_low <= 14:
+        days_score = 75
+    elif days_since_low <= 25:
+        days_score = 45
+    else:
+        days_score = 20
+
+    # Ideal: near low but not still collapsing. 0-8% from low is the tight watch zone.
+    if distance_from_low is None:
+        distance_score = 40
+    elif distance_from_low < -1:
+        distance_score = 5
+    elif distance_from_low <= 8:
+        distance_score = 100
+    elif distance_from_low <= 15:
+        distance_score = 65
+    elif distance_from_low <= 25:
+        distance_score = 30
+    else:
+        distance_score = 10
+
+    rsi_score = clamp((max(rsi_improvement, 0) / 12.0) * 70 + (20 if rsi_slope > 0 else 0) + (10 if rsi_now >= 30 else 0))
+
+    vol_score = 50
+    try:
+        avg_vol20 = float(volume.tail(20).mean())
+        recent_vol3 = float(volume.tail(3).mean())
+        if avg_vol20 > 0:
+            vr = recent_vol3 / avg_vol20
+            # Elevated but not absurd is ideal for post-panic digestion.
+            if vr >= 1.2 and vr <= 3.5:
+                vol_score = 90
+            elif vr > 3.5:
+                vol_score = 70
+            elif vr >= 0.8:
+                vol_score = 65
+            else:
+                vol_score = 35
+    except Exception:
+        vol_score = 50
+
+    score = clamp(0.28 * days_score + 0.25 * distance_score + 0.25 * rsi_score + 0.22 * no_new_low_score)
+    # Small volume confirmation bonus/penalty.
+    score = clamp(0.85 * score + 0.15 * vol_score)
+
+    if score >= 80:
+        label = "🟢 Stabilizing"
+        note = "Price appears to be holding after the panic low; RSI is repairing and sellers have not forced fresh lows."
+    elif score >= 60:
+        label = "🟡 Possible stabilization"
+        note = "Some signs of selling exhaustion are present, but confirmation is still developing."
+    elif score >= 35:
+        label = "⚪ Unclear stabilization"
+        note = "The stock may be trying to stabilize, but the evidence is mixed."
+    else:
+        label = "🔴 Not stabilizing"
+        note = "The panic may still be active or the rebound window may already be too mature."
+
+    reason = (
+        f"{note} Days since panic low: {days_since_low if days_since_low is not None else 'n/a'}; "
+        f"distance from panic low: {distance_from_low:.1f}% if known; "
+        f"RSI low-to-now improvement: {rsi_improvement:+.1f}; "
+        f"new low in last 3 days: {'yes' if new_low_last_3d else 'no'}."
+    )
+    return {
+        "stabilization_score": int(round(score)),
+        "stabilization_label": label,
+        "stabilization_reason": reason,
+        "days_since_panic_low": days_since_low,
+        "distance_from_panic_low_pct": round(distance_from_low, 1) if distance_from_low is not None else None,
+        "new_low_last_3d": bool(new_low_last_3d),
+    }
+
 def speed_score(days):
     if days is None or pd.isna(days):
         return 0
@@ -2350,8 +2518,18 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
                 spring_tf = "1D"
         spring = compute_ttm_spring(spring_df)
 
+        # Tactical 4H trigger: lower timeframe confirmation for entries.
+        # To keep broad scans reasonable, only calculate when the daily context is potentially watchable.
+        trigger_4h = {
+            "spring_score": 0,
+            "spring_label": "⚪ 4H not checked",
+            "spring_reason": "4H trigger is checked only for names near a watchable RSI/panic zone to keep large scans faster.",
+            "momentum_3bar": "—",
+            "momentum_trend": "—",
+        }
         current_price = float(close.iloc[-1])
         current_rsi = float(rsi_series.dropna().iloc[-1]) if not rsi_series.dropna().empty else None
+        should_check_4h = current_rsi is not None and current_rsi <= 58
         opp_score = current_rsi_opportunity_score(current_rsi)
         rebounds = analyze_rsi_swing_outcomes(close, rsi_series, profit_target=profit_target, bounce_days=bounce_days)
         history_score = rebounds["history_score"]
@@ -2412,6 +2590,21 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             except Exception:
                 rsi_oversold_start_date = None
 
+        if (not should_check_4h) and days_since_rsi_under_30 is not None and not pd.isna(days_since_rsi_under_30):
+            should_check_4h = int(days_since_rsi_under_30) <= 45
+
+        if should_check_4h:
+            try:
+                hourly_raw = yf.download(ticker, period="90d", interval="1h", progress=False, auto_adjust=True, threads=False)
+                hourly_df = normalize_ohlcv(hourly_raw, ticker)
+                fourh_df = resample_to_4h(hourly_df)
+                if not fourh_df.empty and len(fourh_df) >= 80:
+                    trigger_4h = compute_ttm_spring(fourh_df)
+                else:
+                    trigger_4h["spring_reason"] = "Not enough 4H history was available to calculate the tactical trigger."
+            except Exception:
+                trigger_4h["spring_reason"] = "4H trigger lookup failed for this ticker."
+
         rebound_stage_score, rebound_stage_label, rebound_stage_reason = rebound_stage_from_series(
             close, rsi_series, spring.get("spring_score", 0), days_since_rsi_under_30
         )
@@ -2425,12 +2618,14 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             0.06 * attention_score
         )))
         setup_quality = int(round(clamp(
-            0.20 * opp_score +
-            0.25 * rebound_stage_score +
-            0.20 * catalyst_score +
-            0.20 * spring.get("spring_score", 0) +
-            0.10 * attention_score +
-            0.05 * volume_trend_score
+            0.16 * opp_score +
+            0.18 * rebound_stage_score +
+            0.14 * stabilization.get("stabilization_score", 0) +
+            0.16 * catalyst_score +
+            0.16 * spring.get("spring_score", 0) +
+            0.10 * trigger_4h.get("spring_score", 0) +
+            0.06 * attention_score +
+            0.04 * volume_trend_score
         )))
 
         potential_sell_price = None
@@ -2445,6 +2640,9 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             recent_event = rebounds["events"][-1]
             recent_cycle_low_price = recent_event.get("Low Close")
             recent_cycle_low_date = recent_event.get("RSI Low Date")
+        stabilization = compute_stabilization_score(
+            close, volume, rsi_series, recent_cycle_low_price, recent_cycle_low_date, days_since_rsi_under_30
+        )
         opp_remaining = opportunity_remaining_from_cycle(
             current_price,
             recent_cycle_low_price,
@@ -2505,6 +2703,17 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "rebound_stage_score": int(round(rebound_stage_score)),
             "rebound_stage_label": rebound_stage_label,
             "rebound_stage_reason": rebound_stage_reason,
+            "stabilization_score": stabilization.get("stabilization_score"),
+            "stabilization_label": stabilization.get("stabilization_label"),
+            "stabilization_reason": stabilization.get("stabilization_reason"),
+            "days_since_panic_low": stabilization.get("days_since_panic_low"),
+            "distance_from_panic_low_pct": stabilization.get("distance_from_panic_low_pct"),
+            "new_low_last_3d": stabilization.get("new_low_last_3d"),
+            "trigger_4h_score": trigger_4h.get("spring_score", 0),
+            "trigger_4h_label": trigger_4h.get("spring_label"),
+            "trigger_4h_reason": trigger_4h.get("spring_reason"),
+            "trigger_4h_momentum_3bar": trigger_4h.get("momentum_3bar"),
+            "trigger_4h_momentum_trend": trigger_4h.get("momentum_trend"),
             "setup_quality": setup_quality,
             "spring_timeframe": spring_tf,
             "spring_df": spring_df,
@@ -2556,6 +2765,7 @@ RANKING_MODES = [
     "🧠 Highest Confidence",
     "🚀 Maximum Upside",
     "😱 Overreaction",
+    "🧊 Stabilizing Panics",
 ]
 
 RANKING_HELP = {
@@ -2563,6 +2773,8 @@ RANKING_HELP = {
     "⚡ Ready Now": "Ranks for names closest to a near-term trigger: strong setup quality, spring timing, RVOL/attention, fresh catalyst, and volume trend.",
     "🧠 Highest Confidence": "Ranks for the most repeatable historical pattern: more events, stronger confidence, better swing history, and cleaner risk/reward.",
     "🚀 Maximum Upside": "Ranks for the largest potential reward. This can surface more volatile names, so use confidence and drawdown carefully.",
+    "😱 Overreaction": "Ranks likely overreaction selloffs: sharp price shock, possible narrative mismatch, remaining opportunity, and recovery context.",
+    "🧊 Stabilizing Panics": "Ranks recent panic selloffs that appear to have stopped falling, especially when the 4H trigger is improving before the daily chart fully confirms.",
 }
 
 
@@ -2628,6 +2840,8 @@ def add_ranking_scores(frame: pd.DataFrame, target_pct: float, window_days: int)
         confidence = _rank_num(row, "Confidence Score")
         history = _rank_num(row, "History Score")
         stage = _rank_num(row, "Rebound Stage Score")
+        stabilization = _rank_num(row, "Stabilization Score")
+        trigger_4h = _rank_num(row, "4H Trigger Score")
         catalyst = _rank_num(row, "Catalyst Score")
         attention = _rank_num(row, "Attention Score")
         volume_trend = _rank_num(row, "Volume Trend Score")
@@ -2652,13 +2866,15 @@ def add_ranking_scores(frame: pd.DataFrame, target_pct: float, window_days: int)
             0.04 * attention
         )
         ready_now = clamp(
-            0.25 * opp_remaining +
-            0.22 * setup +
-            0.20 * spring +
-            0.14 * stage +
-            0.09 * attention +
-            0.06 * catalyst +
-            0.04 * volume_trend
+            0.22 * opp_remaining +
+            0.20 * setup +
+            0.16 * spring +
+            0.14 * trigger_4h +
+            0.12 * stage +
+            0.08 * stabilization +
+            0.04 * attention +
+            0.03 * catalyst +
+            0.01 * volume_trend
         )
         highest_confidence = clamp(
             0.34 * confidence +
@@ -2683,15 +2899,25 @@ def add_ranking_scores(frame: pd.DataFrame, target_pct: float, window_days: int)
             0.06 * spring +
             0.04 * attention
         )
-        scores.append((target_hunter, ready_now, highest_confidence, maximum_upside, overreaction_rank, bounce, speed))
+        stabilizing_panics = clamp(
+            0.28 * stabilization +
+            0.22 * overreaction +
+            0.18 * opp_remaining +
+            0.14 * trigger_4h +
+            0.10 * stage +
+            0.05 * attention +
+            0.03 * catalyst
+        )
+        scores.append((target_hunter, ready_now, highest_confidence, maximum_upside, overreaction_rank, stabilizing_panics, bounce, speed))
 
     out["🎯 Target Hunter Score"] = [int(round(x[0])) for x in scores]
     out["⚡ Ready Now Score"] = [int(round(x[1])) for x in scores]
     out["🧠 Confidence Rank Score"] = [int(round(x[2])) for x in scores]
     out["🚀 Upside Rank Score"] = [int(round(x[3])) for x in scores]
     out["😱 Overreaction Rank Score"] = [int(round(x[4])) for x in scores]
-    out["Target Bounce Score"] = [int(round(x[5])) for x in scores]
-    out["Speed Score"] = [int(round(x[6])) for x in scores]
+    out["🧊 Stabilizing Panic Score"] = [int(round(x[5])) for x in scores]
+    out["Target Bounce Score"] = [int(round(x[6])) for x in scores]
+    out["Speed Score"] = [int(round(x[7])) for x in scores]
     return out
 
 
@@ -2702,6 +2928,7 @@ def ranking_column_for(mode: str) -> str:
         "🧠 Highest Confidence": "🧠 Confidence Rank Score",
         "🚀 Maximum Upside": "🚀 Upside Rank Score",
         "😱 Overreaction": "😱 Overreaction Rank Score",
+        "🧊 Stabilizing Panics": "🧊 Stabilizing Panic Score",
     }.get(mode, "🎯 Target Hunter Score")
 
 
@@ -2996,6 +3223,12 @@ def hot_card(rank, row):
     rebound_stage = row.get("Rebound Stage", "—")
     rebound_stage_score = row.get("Rebound Stage Score", "—")
     rebound_stage_reason = _safe_html(row.get("Rebound Stage Reason", "No rebound stage details available."))
+    stabilization = row.get("Stabilization", "—")
+    stabilization_score = row.get("Stabilization Score", "—")
+    stabilization_reason = _safe_html(row.get("Stabilization Reason", "No stabilization details available."))
+    trigger_4h = row.get("4H Trigger", "—")
+    trigger_4h_score = row.get("4H Trigger Score", "—")
+    trigger_4h_reason = _safe_html(row.get("4H Trigger Reason", "No 4H trigger details available."))
     attention = row.get("Attention", "—")
     volume_trend = row.get("Volume Trend", "—")
     volume_trend_score = row.get("Volume Trend Score", "—")
@@ -3029,11 +3262,13 @@ def hot_card(rank, row):
         <strong>Setup Quality</strong><br>
         This asks: is this worth opening in ThinkorSwim right now?<br><br>
         RSI opportunity: {opp_score}/100 × 20%<br>
-        Rebound stage: {rebound_stage_score}/100 × 25%<br>
-        Catalyst/news: {catalyst_score}/100 × 20%<br>
-        TTM Spring timing: {spring_score}/100 × 20%<br>
-        Attention/RVOL: {attention_score}/100 × 10%<br>
-        Volume trend: {volume_trend_score}/100 × 5%
+        Rebound stage: {rebound_stage_score}/100 × 18%<br>
+        Stabilization: {stabilization_score}/100 × 14%<br>
+        Catalyst/news: {catalyst_score}/100 × 16%<br>
+        Daily TTM Spring: {spring_score}/100 × 16%<br>
+        4H Trigger: {trigger_4h_score}/100 × 10%<br>
+        Attention/RVOL: {attention_score}/100 × 6%<br>
+        Volume trend: {volume_trend_score}/100 × 4%
     """
     spring_score_tip = f"""
         <strong>Spring Score</strong><br>
@@ -3086,6 +3321,18 @@ def hot_card(rank, row):
         {_safe_html(clean_label(rebound_stage))}: {rebound_stage_score}/100<br><br>
         {rebound_stage_reason}<br><br>
         The ideal zone for this app is often Early Reversal: recently oversold, RSI rising, and price starting to lift from the low.
+    """
+    stabilization_tip = f"""
+        <strong>Stabilization</strong><br>
+        {_safe_html(clean_label(stabilization))}: {stabilization_score}/100<br><br>
+        {stabilization_reason}<br><br>
+        This asks whether the panic appears to have stopped falling before the daily chart fully confirms — your WLTH-style watch zone.
+    """
+    trigger_4h_tip = f"""
+        <strong>4H trigger</strong><br>
+        {_safe_html(clean_label(trigger_4h))}: {trigger_4h_score}/100<br><br>
+        {trigger_4h_reason}<br><br>
+        This is the tactical lower-timeframe check: daily may show the setup, while 4H can show whether buyers are starting to step in.
     """
     history_tip = f"""
         <strong>Sample size</strong><br>
@@ -3147,6 +3394,8 @@ def hot_card(rank, row):
             {hover_item('Price', f'{current_price} → {potential_price}', price_tip, dot=True)}
             {hover_item('RSI', f'{rsi} · {clean_label(opportunity)}', rsi_tip, dot=True)}
             {hover_item('Stage', clean_label(rebound_stage), stage_tip, dot=True)}
+            {hover_item('Stabilization', clean_label(stabilization), stabilization_tip, dot=True)}
+            {hover_item('4H Trigger', clean_label(trigger_4h), trigger_4h_tip, dot=True)}
             {hover_item('Potential', f'+{avg_max}% in {avg_days}d avg', bounce_tip, dot=True)}
             {hover_item('Remaining', clean_label(opportunity_remaining), remaining_tip, dot=True)}
             {hover_item('Overreaction', clean_label(overreaction), overreaction_tip, dot=True)}
@@ -3405,6 +3654,16 @@ for r in results:
         "Rebound Stage": r.get("rebound_stage_label"),
         "Rebound Stage Score": r.get("rebound_stage_score"),
         "Rebound Stage Reason": r.get("rebound_stage_reason"),
+        "Stabilization": r.get("stabilization_label"),
+        "Stabilization Score": r.get("stabilization_score"),
+        "Stabilization Reason": r.get("stabilization_reason"),
+        "Days Since Panic Low": r.get("days_since_panic_low"),
+        "Distance From Panic Low %": r.get("distance_from_panic_low_pct"),
+        "New Low Last 3D": r.get("new_low_last_3d"),
+        "4H Trigger": r.get("trigger_4h_label"),
+        "4H Trigger Score": r.get("trigger_4h_score"),
+        "4H Trigger Reason": r.get("trigger_4h_reason"),
+        "4H Momentum 3-Bar": r.get("trigger_4h_momentum_3bar"),
         "Price": r["price"],
         "Potential Swing Price": r.get("potential_sell_price"),
         "Cycle Low Price": r.get("cycle_low_price"),
@@ -3598,10 +3857,10 @@ ascending = sort_direction == "Ascending"
 display = filtered_df.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
-    "Ticker", "Favorite", "Active Rank Score", "Setup Quality", "Swing Score", "Rebound Stage", "Spring TF", "Spring", "Spring Score", "Attention", "Volume Trend", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
+    "Ticker", "Favorite", "Active Rank Score", "Setup Quality", "Swing Score", "Rebound Stage", "Stabilization", "4H Trigger", "Spring TF", "Spring", "Spring Score", "Attention", "Volume Trend", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
 ]
 research_cols = compact_cols + [
-    "🎯 Target Hunter Score", "⚡ Ready Now Score", "🧠 Confidence Rank Score", "🚀 Upside Rank Score", "Target Bounce Score", "Speed Score", "Rebound Stage Score", "Rebound Stage Reason", "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Trend Score", "Volume Trend Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Opportunity Remaining Score", "Opportunity Remaining %", "Move Completed %", "Cycle Low Price", "Cycle Target Price", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "🎯 Target Hunter Score", "⚡ Ready Now Score", "🧠 Confidence Rank Score", "🚀 Upside Rank Score", "😱 Overreaction Rank Score", "🧊 Stabilizing Panic Score", "Target Bounce Score", "Speed Score", "Rebound Stage Score", "Rebound Stage Reason", "Stabilization Score", "Stabilization Reason", "Days Since Panic Low", "Distance From Panic Low %", "New Low Last 3D", "4H Trigger Score", "4H Trigger Reason", "4H Momentum 3-Bar", "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Trend Score", "Volume Trend Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Opportunity Remaining Score", "Opportunity Remaining %", "Move Completed %", "Cycle Low Price", "Cycle Target Price", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -3618,6 +3877,8 @@ st.dataframe(
         "Setup Quality": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Swing Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Spring Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
+        "Stabilization Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
+        "4H Trigger Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Attention Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Confidence Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Catalyst Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
@@ -3694,9 +3955,9 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V6.4 uses multiple view-by lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (20% current RSI opportunity, 25% Rebound Stage, 20% catalyst/news, 20% TTM Spring, 10% attention/RVOL, 5% volume trend).
+    Current V10.6 uses multiple view-by lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (RSI opportunity, rebound stage, stabilization, catalyst/news, daily TTM spring, 4H trigger, attention/RVOL, and volume trend).
 
-    **View By** defines what #1 means. 🎯 Target Hunter is the default for your 8% swing goal; ⚡ Ready Now is for what to open in ThinkorSwim first; 🧠 Highest Confidence is the safest historical pattern; 🚀 Maximum Upside is the biggest reward lens. V6.4 also adds **Opportunity Remaining**, which estimates how much of the usual RSI-panic rebound may still be left from the most recent panic-cycle low.
+    **View By** defines what #1 means. 🎯 Target Hunter is the default for your 8% swing goal; ⚡ Ready Now is for what to open in ThinkorSwim first; 🧠 Highest Confidence is the safest historical pattern; 🚀 Maximum Upside is the biggest reward lens; 😱 Overreaction hunts likely false-panic selloffs; 🧊 Stabilizing Panics finds names where the panic may have stopped but the daily chart has not fully confirmed yet. **Opportunity Remaining** estimates how much of the usual RSI-panic rebound may still be left from the most recent panic-cycle low.
 
 **Setup ≥75** is the “open this in ThinkorSwim now” bucket. Stocks in the high 60s/low 70s are often the almost-there names — they may need one more thing, such as RSI slipping lower, a stronger spring turn, fresh news, or higher relative volume.
 
@@ -3745,6 +4006,10 @@ if detail:
         tags.append(f"<span class='tag tag-blue'>{opp}</span>")
     if detail.get("rebound_stage_label"):
         tags.append(f"<span class='tag tag-green'>Stage: {detail.get('rebound_stage_label')} · {detail.get('rebound_stage_score', 0)}/100</span>")
+    if detail.get("stabilization_label"):
+        tags.append(f"<span class='tag tag-yellow'>Stabilization: {detail.get('stabilization_label')} · {detail.get('stabilization_score', 0)}/100</span>")
+    if detail.get("trigger_4h_label"):
+        tags.append(f"<span class='tag tag-blue'>4H Trigger: {detail.get('trigger_4h_label')} · {detail.get('trigger_4h_score', 0)}/100</span>")
     tags.append(f"<span class='tag tag-green'>{detail.get('event_count', 0)} historical RSI&lt;30 events</span>")
     if detail.get("confidence_label"):
         tags.append(f"<span class='tag tag-blue'>{detail.get('confidence_label')}</span>")
@@ -3760,6 +4025,10 @@ if detail:
     st.markdown("".join(tags), unsafe_allow_html=True)
     if detail.get("rebound_stage_reason"):
         st.caption(f"Rebound stage: {detail['rebound_stage_reason']}")
+    if detail.get("stabilization_reason"):
+        st.caption(f"Stabilization: {detail['stabilization_reason']}")
+    if detail.get("trigger_4h_reason"):
+        st.caption(f"4H trigger: {detail['trigger_4h_reason']}")
     if detail.get("volume_trend_reason"):
         st.caption(f"Volume trend: {detail['volume_trend_reason']}")
     if detail.get("spring_reason"):
