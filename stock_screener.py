@@ -1,5 +1,5 @@
 """
-SwingIt V10.6 — Universe Accuracy + Profile Defaults + Morning Report
+SwingIt V10.6.1 — Universe Accuracy + Profile Defaults + Morning Report
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V10.6",
+    page_title="SwingIt V10.6.1",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -376,7 +376,7 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V10.6</div>
+            <div class="terminal-title">🔥 SwingIt V10.6.1</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
@@ -2609,6 +2609,31 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             close, rsi_series, spring.get("spring_score", 0), days_since_rsi_under_30
         )
 
+        potential_sell_price = None
+        if rebounds.get("avg_max_bounce_pct") is not None:
+            potential_sell_price = current_price * (1 + float(rebounds["avg_max_bounce_pct"]) / 100)
+
+        # Opportunity Remaining answers: if this is the current RSI panic cycle,
+        # how much of its usual historical rebound is still left from the RSI-event low?
+        recent_cycle_low_price = None
+        recent_cycle_low_date = None
+        if rebounds.get("events"):
+            recent_event = rebounds["events"][-1]
+            recent_cycle_low_price = recent_event.get("Low Close")
+            recent_cycle_low_date = recent_event.get("RSI Low Date")
+
+        # V10.6 fix: stabilization must be calculated BEFORE Setup Quality uses it.
+        # The earlier build referenced stabilization too early, causing every candidate
+        # to error inside compute_candidate() and return None, which made scans show 0 usable tickers.
+        stabilization = compute_stabilization_score(
+            close, volume, rsi_series, recent_cycle_low_price, recent_cycle_low_date, days_since_rsi_under_30
+        )
+        opp_remaining = opportunity_remaining_from_cycle(
+            current_price,
+            recent_cycle_low_price,
+            rebounds.get("avg_max_bounce_pct"),
+        )
+
         # Swing Score = historical rebound candidate quality.
         # Setup Quality = right-now attention/timing quality.
         swing_score = int(round(clamp(
@@ -2627,27 +2652,6 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             0.06 * attention_score +
             0.04 * volume_trend_score
         )))
-
-        potential_sell_price = None
-        if rebounds.get("avg_max_bounce_pct") is not None:
-            potential_sell_price = current_price * (1 + float(rebounds["avg_max_bounce_pct"]) / 100)
-
-        # Opportunity Remaining answers: if this is the current RSI panic cycle,
-        # how much of its usual historical rebound is still left from the RSI-event low?
-        recent_cycle_low_price = None
-        recent_cycle_low_date = None
-        if rebounds.get("events"):
-            recent_event = rebounds["events"][-1]
-            recent_cycle_low_price = recent_event.get("Low Close")
-            recent_cycle_low_date = recent_event.get("RSI Low Date")
-        stabilization = compute_stabilization_score(
-            close, volume, rsi_series, recent_cycle_low_price, recent_cycle_low_date, days_since_rsi_under_30
-        )
-        opp_remaining = opportunity_remaining_from_cycle(
-            current_price,
-            recent_cycle_low_price,
-            rebounds.get("avg_max_bounce_pct"),
-        )
 
 
         panic = panic_shock_from_df(close, volume, lookback_days=15)
@@ -3955,7 +3959,7 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V10.6 uses multiple view-by lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (RSI opportunity, rebound stage, stabilization, catalyst/news, daily TTM spring, 4H trigger, attention/RVOL, and volume trend).
+    Current V10.6.1 uses multiple view-by lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (RSI opportunity, rebound stage, stabilization, catalyst/news, daily TTM spring, 4H trigger, attention/RVOL, and volume trend).
 
     **View By** defines what #1 means. 🎯 Target Hunter is the default for your 8% swing goal; ⚡ Ready Now is for what to open in ThinkorSwim first; 🧠 Highest Confidence is the safest historical pattern; 🚀 Maximum Upside is the biggest reward lens; 😱 Overreaction hunts likely false-panic selloffs; 🧊 Stabilizing Panics finds names where the panic may have stopped but the daily chart has not fully confirmed yet. **Opportunity Remaining** estimates how much of the usual RSI-panic rebound may still be left from the most recent panic-cycle low.
 
