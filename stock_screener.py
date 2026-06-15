@@ -4433,15 +4433,108 @@ def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: 
     }
 
 
+
+def compute_portfolio_fallback_candidate(ticker: str, entry_price: float, goal_pct: float) -> dict | None:
+    """Lightweight Portfolio fallback.
+
+    Portfolio mode should still work even if the full scanner candidate engine
+    fails for a ticker because of a news/universe/scanner-specific edge case.
+    This fallback only needs enough fields to manage an existing position.
+    """
+    try:
+        raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True, threads=False)
+        df = normalize_ohlcv(raw, ticker)
+        if df.empty or len(df) < 40:
+            return None
+
+        close = df["Close"].astype(float)
+        volume = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(index=df.index, dtype=float)
+        current_price = float(close.iloc[-1])
+        rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
+        current_rsi = float(rsi_series.dropna().iloc[-1]) if not rsi_series.dropna().empty else None
+        spring = compute_ttm_spring(df)
+        avg_vol_20d = float(volume.tail(20).mean()) if len(volume.dropna()) else None
+        current_volume = float(volume.iloc[-1]) if len(volume.dropna()) else None
+        volume_ratio = (current_volume / avg_vol_20d) if avg_vol_20d and avg_vol_20d > 0 and current_volume else None
+        volume_trend_score, volume_trend_label, volume_trend_reason = volume_trend_from_series(volume) if len(volume.dropna()) else (50, "⚪ Unknown", "No volume trend data.")
+
+        # Entry-goal target is the safest portfolio fallback target.
+        goal = float(goal_pct or 8)
+        target_price = float(entry_price or current_price) * (1 + goal / 100.0) if (entry_price or current_price) else current_price
+        if target_price <= 0:
+            target_price = current_price
+        gain_from_current = ((target_price - current_price) / current_price * 100) if current_price else 0
+        if entry_price and target_price > entry_price:
+            completed = clamp(((current_price - entry_price) / (target_price - entry_price)) * 100)
+        else:
+            completed = 0
+        remaining = clamp(100 - completed)
+
+        news = get_news_snapshot(ticker, volume_ratio)
+        panic = panic_shock_from_df(close, volume, lookback_days=15)
+        narrative = narrative_mismatch_from_news(news, panic.get("panic_shock_score", 0))
+        news_intel = news_intelligence_from_news(news, panic, narrative)
+
+        company_name = ticker
+        try:
+            info = yf.Ticker(ticker).fast_info
+            # fast_info won't usually have longName, but keep this non-fatal.
+        except Exception:
+            pass
+
+        return {
+            "ticker": ticker,
+            "company_name": company_name,
+            "price": round(current_price, 2),
+            "potential_sell_price": round(float(target_price), 2),
+            "target_gain_pct_from_current": gain_from_current,
+            "target_reason": "Portfolio fallback target: entry price plus your selected profit goal.",
+            "target_confidence": "Fallback",
+            "opportunity_remaining_pct": remaining,
+            "opportunity_remaining_score": int(round(remaining)),
+            "opportunity_remaining_label": ("🟢 Early" if remaining >= 70 else "🟡 Developing" if remaining >= 40 else "🟠 Late" if remaining >= 20 else "🔴 Extended"),
+            "move_completed_pct": completed,
+            "avg_vol_20d": int(avg_vol_20d) if avg_vol_20d else None,
+            "current_volume": int(current_volume) if current_volume else None,
+            "volume_ratio": round(float(volume_ratio), 2) if volume_ratio is not None else None,
+            "attention_score": int(round(_volume_score_from_ratio(volume_ratio))),
+            "attention_label": attention_label_from_ratio(volume_ratio),
+            "volume_trend_score": int(round(volume_trend_score)),
+            "volume_trend_label": volume_trend_label,
+            "volume_trend_reason": volume_trend_reason,
+            "current_rsi": round(current_rsi, 1) if current_rsi is not None else None,
+            "opportunity": opportunity_label(current_rsi),
+            "spring_score": spring.get("spring_score", 0),
+            "spring_label": spring.get("spring_label"),
+            "spring_reason": spring.get("spring_reason"),
+            "momentum_3bar": spring.get("momentum_3bar"),
+            "momentum_trend": spring.get("momentum_trend"),
+            "analyst_verdict": news_intel.get("analyst_verdict"),
+            "analyst_note": news_intel.get("analyst_note"),
+            "event_type": news_intel.get("event_type"),
+            "market_excuse": news_intel.get("market_excuse"),
+            "reaction_analysis": news_intel.get("reaction_analysis"),
+            "red_flag_label": narrative.get("red_flag_label"),
+            "df": df,
+            "rsi_series": rsi_series,
+            "fallback_candidate": True,
+        }
+    except Exception as e:
+        return None
+
 @st.cache_data(ttl=900, show_spinner=False)
 def compute_portfolio_deep(ticker: str, entry_price: float, entry_date: str, goal_pct: float):
     candidate = compute_candidate(ticker, goal_pct or 8, 30, True, "1D")
+    fallback_used = False
+    if not candidate:
+        candidate = compute_portfolio_fallback_candidate(ticker, entry_price, goal_pct)
+        fallback_used = bool(candidate)
     if not candidate:
         return None
     fourh = _download_intraday_spring(ticker, "4H")
     oneh = _download_intraday_spring(ticker, "1H")
     analysis = portfolio_exit_analysis(candidate, {"Entry Price": entry_price, "Entry Date": entry_date, "Profit Goal %": goal_pct}, fourh, oneh)
-    return {"candidate": candidate, "fourh": fourh, "oneh": oneh, "analysis": analysis}
+    return {"candidate": candidate, "fourh": fourh, "oneh": oneh, "analysis": analysis, "fallback_used": fallback_used}
 
 
 def render_portfolio_command_center():
@@ -4502,12 +4595,15 @@ def render_portfolio_command_center():
         analysis = data["analysis"]
         fourh = data["fourh"]
         oneh = data["oneh"]
+        fallback_used = data.get("fallback_used", False)
         company = c.get("company_name") or ticker
         with st.container():
             st.markdown("<div class='portfolio-card'>", unsafe_allow_html=True)
             st.markdown(f"<div class='portfolio-title'>{ticker} <span class='company-name'>{html.escape(str(company))}</span></div>", unsafe_allow_html=True)
             st.markdown(f"<div class='portfolio-subtitle'>Entry ${float(pos.get('Entry Price',0) or 0):.2f} · Goal {float(pos.get('Profit Goal %',8) or 8):.1f}% · Entry date {html.escape(str(pos.get('Entry Date','—') or '—'))}</div>", unsafe_allow_html=True)
             st.markdown(f"<span class='decision-pill {analysis['klass']}'>{analysis['verdict']} · Confidence {analysis['confidence']}</span>", unsafe_allow_html=True)
+            if fallback_used:
+                st.caption("Using lightweight portfolio analysis for this ticker because the full scanner read was unavailable.")
             st.markdown(f"<div class='read-box'><div class='read-title'>🧠 Trade Story</div><div class='read-text'>{html.escape(analysis['trade_story'])}</div></div>", unsafe_allow_html=True)
             st.markdown(f"<div class='read-box'><div class='read-title'>⏳ Exit Window</div><div class='read-text'><strong>{html.escape(analysis['window'])}</strong><br>{html.escape(analysis['reason'])}<br>{html.escape(analysis['oneh_note'])}</div></div>", unsafe_allow_html=True)
             m1, m2, m3, m4, m5 = st.columns(5)
