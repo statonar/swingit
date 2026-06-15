@@ -1,5 +1,5 @@
 """
-SwingIt V11.1 — Market Read Cleanup
+SwingIt V11.2 — Analyst Verdict
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -143,6 +143,10 @@ st.markdown(
     }
     .hot-title { font-size:.92rem; font-weight:900; margin-bottom:8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .company-name { color:var(--muted); font-weight:700; font-size:.78rem; margin-left:4px; }
+    .analyst-verdict-box { background:linear-gradient(135deg,#f8fafc 0%,#eef4ff 100%); border:1px solid var(--border); border-radius:12px; padding:7px 8px; margin:5px 0 7px 0; }
+    .verdict-line { display:flex; align-items:center; gap:6px; font-size:.74rem; font-weight:950; letter-spacing:.01em; text-transform:uppercase; color:var(--text); line-height:1.15; }
+    .verdict-confidence { margin-left:auto; font-size:.58rem; font-weight:900; color:var(--muted); background:#fff; border:1px solid var(--border); border-radius:999px; padding:2px 6px; text-transform:none; white-space:nowrap; }
+    .verdict-summary { margin-top:4px; font-size:.66rem; color:#475569; line-height:1.25; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
     .score-row { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; margin:6px 0 8px 0; }
     .score-tile { background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:6px 5px; }
     .score-num { font-size:1.12rem; font-weight:950; color:var(--accent); line-height:1.05; }
@@ -3252,6 +3256,18 @@ def dot_class(value):
             return "dot-red"
         return "dot-gray"
 
+    # Analyst verdict labels
+    if "prime candidate" in text:
+        return "dot-green"
+    if "watch closely" in text:
+        return "dot-yellow"
+    if "too early" in text:
+        return "dot-yellow"
+    if "recovery underway" in text or "too late" in text:
+        return "dot-red"
+    if "avoid" in text:
+        return "dot-red"
+
     # Market Read / News Intelligence verdicts
     if "false panic" in text:
         return "dot-green"
@@ -3293,6 +3309,78 @@ def hover_item(title, value, tip, dot=False):
         f"<div class='tip-box'>{safe_tip}</div>"
         f"</div>"
     )
+
+def _numeric_from_row(row, key, default=0):
+    try:
+        value = row.get(key, default)
+        if value in [None, "", "—"] or pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def analyst_verdict_from_row(row):
+    """V11.2: translate all SwingIt evidence into an analyst-style action label."""
+    market_read = clean_label(row.get("Analyst Verdict", "")).lower()
+    event_type = clean_label(row.get("Event Type", "")).lower()
+    red_flags = clean_label(row.get("Red Flags", "")).lower()
+    daily_spring = clean_label(row.get("Spring", "")).lower()
+    trigger_4h = clean_label(row.get("4H Trigger", "")).lower()
+    stabilization = clean_label(row.get("Stabilization", "")).lower()
+    rebound_stage = clean_label(row.get("Rebound Stage", "")).lower()
+
+    swing = _numeric_from_row(row, "Swing Score")
+    setup = _numeric_from_row(row, "Setup Quality")
+    spring_score = _numeric_from_row(row, "Spring Score")
+    overreaction = _numeric_from_row(row, "Overreaction Score")
+    remaining = _numeric_from_row(row, "Opportunity Remaining %")
+    stab_score = _numeric_from_row(row, "Stabilization Score")
+    trigger_score = _numeric_from_row(row, "4H Trigger Score")
+    news_score = _numeric_from_row(row, "Market Read Score")
+    confidence_score = _numeric_from_row(row, "Confidence Score")
+    rsi = _numeric_from_row(row, "RSI", 50)
+
+    has_red_flag = any(x in red_flags for x in ["red flag", "capped", "fundamental damage", "broken", "avoid"])
+    bad_story = any(x in market_read for x in ["fundamental damage", "broken", "appropriate", "justified"])
+    too_late = remaining not in [None, "—"] and remaining < 25
+    extended = ("extended" in rebound_stage) or rsi >= 63
+    short_turn = trigger_score >= 65 or any(x in trigger_4h for x in ["fired up", "improving", "early turn", "loaded"])
+    stable = stab_score >= 65 or any(x in stabilization for x in ["stabilizing", "high", "strong"])
+    false_panic = any(x in market_read for x in ["false panic", "overdone", "possible overreaction"])
+    daily_ok = not any(x in daily_spring for x in ["accelerating down", "fired down"])
+
+    if has_red_flag or (bad_story and overreaction < 65):
+        verdict = "🚨 Avoid"
+        confidence = "High" if news_score >= 60 or has_red_flag else "Moderate"
+        summary = "The decline appears tied to meaningful business or headline risk. Technical rebound signals may be less reliable until the story improves."
+    elif too_late or extended:
+        verdict = "😴 Recovery Underway"
+        confidence = "High" if remaining < 20 else "Moderate"
+        summary = "The rebound has already progressed substantially. Momentum may still be positive, but much of the usual historical opportunity appears captured."
+    elif false_panic and overreaction >= 70 and remaining >= 50 and stable and short_turn and daily_ok and setup >= 60:
+        verdict = "🔥 Prime Candidate"
+        confidence = "High" if confidence_score >= 70 and news_score >= 60 else "Moderate"
+        summary = "The selloff looks potentially overdone, selling pressure is stabilizing, and short-term buyers are beginning to appear while meaningful upside may remain."
+    elif (overreaction >= 60 or swing >= 65) and remaining >= 40 and (stable or short_turn):
+        verdict = "👀 Watch Closely"
+        confidence = "High" if confidence_score >= 70 else "Moderate"
+        summary = "The stock is showing signs that the panic may be ending, but one or more confirmations are still missing before it becomes a high-conviction entry."
+    elif overreaction >= 55 or swing >= 60 or rsi <= 35:
+        verdict = "⏳ Too Early"
+        confidence = "Moderate"
+        summary = "The idea is interesting, but the timing is still immature. Let the selling pressure exhaust and wait for stabilization or a lower-timeframe trigger."
+    else:
+        verdict = "⚪ No Clear Edge"
+        confidence = "Low"
+        summary = "The current evidence does not show a strong swing-trade edge yet. Keep it in the table, but it does not deserve top-card attention on its own."
+
+    details = (
+        f"Swing: {swing:.0f}/100 · Setup: {setup:.0f}/100 · Overreaction: {overreaction:.0f}/100 · "
+        f"Stabilization: {stab_score:.0f}/100 · 4H Trigger: {trigger_score:.0f}/100 · "
+        f"Opportunity remaining: {remaining:.0f}% · Market Read: {clean_label(row.get('Analyst Verdict', '—'))}"
+    )
+    return verdict, confidence, summary, details
 
 
 def _volume_score_from_ratio(volume_ratio):
@@ -3349,6 +3437,8 @@ def hot_card(rank, row):
     ticker = _safe_html(row.get("Ticker"))
     company = clean_label(row.get("Company", ""))
     company_html = f"<span class='company-name'>{_safe_html(company)}</span>" if company and company != "—" else ""
+
+    analyst_action, analyst_confidence, analyst_summary, analyst_details = analyst_verdict_from_row(row)
 
     swing_score = row.get("Swing Score", "—")
     setup_quality = row.get("Setup Quality", "—")
@@ -3418,6 +3508,16 @@ def hot_card(rank, row):
     news_evidence = _safe_html(row.get("News Evidence", "No keyword evidence available."))
     analyst_note = _safe_html(row.get("Analyst Note", "No analyst note available."))
     news_freshness = _safe_html(row.get("News Freshness", "age unknown"))
+
+    analyst_tip = f"""
+        <strong>Analyst Verdict</strong><br>
+        Verdict: {_safe_html(clean_label(analyst_action))}<br>
+        Confidence: {_safe_html(analyst_confidence)}<br><br>
+        <strong>Why</strong><br>
+        {_safe_html(analyst_summary)}<br><br>
+        <strong>Evidence snapshot</strong><br>
+        {_safe_html(analyst_details)}
+    """
 
     swing_tip = f"""
         <strong>Swing Score</strong><br>
@@ -3564,6 +3664,11 @@ def hot_card(rank, row):
     return f"""
     <div class="hot-card">
         <div class="hot-title">{rank_label} {ticker}{company_html}</div>
+        <div class="analyst-verdict-box hover-tip">
+            <div class="verdict-line"><span class="dot {dot_class(analyst_action)}"></span>{_safe_html(clean_label(analyst_action))}<span class="verdict-confidence">Confidence: {_safe_html(analyst_confidence)}</span></div>
+            <div class="verdict-summary">{_safe_html(analyst_summary)}</div>
+            <div class="tip-box">{analyst_tip}</div>
+        </div>
         <div class="score-row">
             <div class="score-tile hover-tip"><div class="score-num">{swing_score}</div><div class="score-label">Swing</div><div class="tip-box">{swing_tip}</div></div>
             <div class="score-tile hover-tip"><div class="score-num">{setup_quality}</div><div class="score-label">Setup</div><div class="tip-box">{setup_tip}</div></div>
