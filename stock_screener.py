@@ -4302,6 +4302,13 @@ def portfolio_chart(df: pd.DataFrame, title: str, entry_price=None, target_price
 
 
 def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: dict) -> dict:
+    """Portfolio-specific exit logic.
+
+    The scanner decides whether something is worth entering. Portfolio mode decides
+    whether an existing position should keep working. News still matters, but once
+    price/momentum are confirming the trade, old negative headlines should not by
+    themselves force an emergency exit.
+    """
     entry = float(position.get("Entry Price", 0) or 0)
     goal = float(position.get("Profit Goal %", 8) or 8)
     price = _to_float(candidate.get("price"), 0)
@@ -4312,42 +4319,85 @@ def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: 
     daily_score = _to_float(candidate.get("spring_score"), 0)
     fourh_score = _to_float(fourh.get("spring", {}).get("spring_score"), 0)
     oneh_score = _to_float(oneh.get("spring", {}).get("spring_score"), 0)
-    market_read = clean_label(candidate.get("analyst_verdict", ""))
+    volume_trend_score = _to_float(candidate.get("volume_trend_score"), 50)
+    setup_score = _to_float(candidate.get("setup_quality"), 0)
+    market_read = clean_label(candidate.get("market_read_label", candidate.get("analyst_verdict", "")))
     red_flag = clean_label(candidate.get("red_flag_label", ""))
 
+    # Trade Health = what the position is doing now.
+    # This is intentionally more important than the original entry/news thesis once we own it.
+    trade_health = round(clamp(
+        (fourh_score * 0.35) +
+        (oneh_score * 0.20) +
+        (daily_score * 0.20) +
+        (volume_trend_score * 0.15) +
+        (min(max(current_rsi, 0), 70) / 70 * 100 * 0.10)
+    ))
+
+    # Thesis risk = true story damage, not merely "the news was scary."
+    hard_red_flag_terms = [
+        "fraud", "sec", "investigation", "bankruptcy", "liquidity", "accounting",
+        "guidance cut", "cut guidance", "fundamental damage", "broken"
+    ]
+    thesis_text = f"{market_read} {red_flag}".lower()
+    hard_red_flag = any(term in thesis_text for term in hard_red_flag_terms)
+    broken = ("fundamental damage" in thesis_text or "broken" in thesis_text or hard_red_flag)
+
+    # The 1H should only become important near the harvest zone or when 4H starts weakening.
     exit_assistant_active = progress >= 80 or opp_remaining <= 25 or fourh_score < 45
 
-    broken = ("broken" in market_read.lower() or "fundamental" in market_read.lower() or "red" in red_flag.lower())
-    if broken and gain_pct < goal:
+    # Strong current confirmation should override old/scary news unless there is a hard red flag.
+    current_confirmation_strong = (fourh_score >= 65 and oneh_score >= 55 and trade_health >= 60)
+    current_confirmation_weak = (fourh_score < 40 and oneh_score < 45 and daily_score < 35)
+
+    if hard_red_flag and current_confirmation_weak:
         verdict = "🚨 Exit Early"
         klass = "decision-red"
         confidence = "High"
-        reason = "The trade story may be weakening because the market/news read includes a fundamental or red-flag warning."
+        reason = "A hard red-flag headline is present and the current trade health is weak. The thesis may be breaking, not merely digesting bad news."
         window = "Now / next session"
-    elif gain_pct >= goal and (oneh_score < 45 or opp_remaining <= 20 or current_rsi >= 68):
+    elif broken and not current_confirmation_strong and gain_pct < goal:
+        verdict = "⚠️ Reassess Thesis"
+        klass = "decision-yellow"
+        confidence = "Moderate"
+        reason = "The market/news read contains a fundamental warning, but this is not an automatic exit unless price and momentum confirm weakness."
+        window = "Watch next 1–2 sessions"
+    elif gain_pct >= goal and (oneh_score < 45 or opp_remaining <= 20 or current_rsi >= 70):
         verdict = "🔴 Take Profit"
         klass = "decision-red"
         confidence = "High"
-        reason = "Your goal has been reached and the short timeframe or remaining-opportunity read suggests the easy part of the move may be ending."
+        reason = "Your profit goal has been reached and the 1H/remaining-opportunity read suggests the easy part of the move may be ending."
         window = "Today to next 1 trading day"
-    elif progress >= 80 and (oneh_score < 60 or fourh_score < 55 or opp_remaining <= 30):
-        verdict = "🟡 Trim Soon"
-        klass = "decision-yellow"
-        confidence = "Moderate"
-        reason = "The trade is near the harvest zone. Use the 1H chart to fine-tune whether to exit this morning, afternoon, or next session."
-        window = "0–2 trading days"
-    elif gain_pct > goal and fourh_score >= 65 and oneh_score >= 60:
+    elif gain_pct >= goal and fourh_score >= 65 and oneh_score >= 60:
         verdict = "🚀 Let Winner Run"
         klass = "decision-blue"
         confidence = "Moderate"
         reason = "The goal has been reached, but 4H and 1H momentum still look constructive. Consider trailing rather than selling blindly."
         window = "1–4 trading days, if momentum holds"
-    elif fourh_score >= 60 and daily_score >= 35 and opp_remaining >= 30:
+    elif progress >= 80 and (oneh_score < 60 or fourh_score < 55 or opp_remaining <= 30):
+        verdict = "🟡 Trim Soon"
+        klass = "decision-yellow"
+        confidence = "Moderate"
+        reason = "The trade is entering the harvest zone. Use the 1H chart to fine-tune whether to exit this morning, afternoon, or next session."
+        window = "0–2 trading days"
+    elif current_confirmation_strong and opp_remaining >= 20:
         verdict = "🟢 Hold Strong"
         klass = "decision-green"
         confidence = "Moderate"
-        reason = "The position still has room and the tactical trend has not shown enough weakness to force an exit."
-        window = "3–10 trading days, if the setup continues"
+        reason = "Current price action and momentum are confirming the trade. News risk remains worth monitoring, but the market is not currently validating an exit."
+        window = "2–7 trading days, if the setup continues"
+    elif fourh_score >= 55 and oneh_score >= 50 and opp_remaining >= 25:
+        verdict = "👀 Hold / Monitor"
+        klass = "decision-blue"
+        confidence = "Moderate"
+        reason = "The position is still constructive enough to let it work, but it needs continued 4H/1H confirmation."
+        window = "Reassess daily"
+    elif current_confirmation_weak and gain_pct < 0:
+        verdict = "⚠️ Reassess Thesis"
+        klass = "decision-yellow"
+        confidence = "Moderate"
+        reason = "The position is under entry and momentum is not confirming yet. Watch closely for a failed setup rather than forcing an immediate exit."
+        window = "Next 1–2 sessions"
     else:
         verdict = "👀 Monitor"
         klass = "decision-blue"
@@ -4355,15 +4405,17 @@ def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: 
         reason = "The trade is still developing. Watch whether 4H momentum improves or rolls over before changing the plan."
         window = "Reassess daily"
 
-    if not exit_assistant_active and verdict in ["🟢 Hold Strong", "👀 Monitor"]:
+    if not exit_assistant_active and verdict in ["🟢 Hold Strong", "👀 Hold / Monitor", "👀 Monitor"]:
         oneh_note = "1H Exit Assistant is not fully active yet because the trade is not near the profit goal or exhaustion zone."
     else:
         oneh_note = "1H Exit Assistant is active: use the 1H read to fine-tune sell timing."
 
     trade_story = (
         f"You entered at ${entry:.2f}; current price is about ${price:.2f}, a {gain_pct:+.2f}% move toward your {goal:.1f}% goal. "
-        f"Opportunity remaining is estimated near {opp_remaining:.0f}%. Daily spring is {clean_label(candidate.get('spring_label','—'))}; "
-        f"4H is {clean_label(fourh.get('spring',{}).get('spring_label','—'))}; 1H is {clean_label(oneh.get('spring',{}).get('spring_label','—'))}."
+        f"Trade Health is {trade_health}/100. Opportunity remaining is estimated near {opp_remaining:.0f}%. "
+        f"Daily spring is {clean_label(candidate.get('spring_label','—'))}; "
+        f"4H is {clean_label(fourh.get('spring',{}).get('spring_label','—'))}; "
+        f"1H is {clean_label(oneh.get('spring',{}).get('spring_label','—'))}."
     )
 
     return {
@@ -4374,6 +4426,7 @@ def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: 
         "window": window,
         "gain_pct": gain_pct,
         "progress_pct": progress,
+        "trade_health": trade_health,
         "oneh_note": oneh_note,
         "exit_assistant_active": exit_assistant_active,
         "trade_story": trade_story,
