@@ -1,5 +1,5 @@
 """
-SwingIt V11.3 — Fast Scan + Conservative Targets
+SwingIt V12 — My Portfolio Command Center
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V11.3",
+    page_title="SwingIt V12",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -244,6 +244,26 @@ st.markdown(
     .tag-amber { background:#fef3c7; color:var(--amber); }
     .tag-blue { background:#dbeafe; color:var(--accent); }
     hr { border-color:var(--border)!important; }
+
+    .portfolio-card {
+        background:var(--surface);
+        border:1px solid var(--border);
+        border-radius:18px;
+        padding:16px 18px;
+        box-shadow:0 8px 22px rgba(15,23,42,.06);
+        margin-bottom:16px;
+    }
+    .portfolio-title {font-size:1.25rem;font-weight:950;margin-bottom:3px;}
+    .portfolio-subtitle {color:var(--muted);font-size:.86rem;margin-bottom:10px;}
+    .decision-pill {display:inline-block;border-radius:999px;padding:5px 10px;font-weight:900;font-size:.78rem;margin-bottom:8px;}
+    .decision-green {background:#dcfce7;color:#166534;}
+    .decision-yellow {background:#fef3c7;color:#92400e;}
+    .decision-red {background:#fee2e2;color:#991b1b;}
+    .decision-blue {background:#dbeafe;color:#1d4ed8;}
+    .read-box {background:#f8fafc;border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin:10px 0;}
+    .read-title {font-weight:950;font-size:.88rem;margin-bottom:5px;}
+    .read-text {font-size:.84rem;color:#475569;line-height:1.45;}
+
 </style>
 """,
     unsafe_allow_html=True,
@@ -372,19 +392,31 @@ else:
     st.session_state.setdefault("candidate_gate_mode", current_profile_settings.get("default_candidate_gate", APP_DEFAULT_SETTINGS["default_candidate_gate"]))
 
 with st.container(border=True):
-    top_title_col, top_universe_col, top_profile_settings_col, top_model_col, top_run_col = st.columns(
-        [1.2, 2.15, 1.35, 1.55, 1.15],
+    top_title_col, top_workspace_col, top_universe_col, top_profile_settings_col, top_model_col, top_run_col = st.columns(
+        [1.05, 1.05, 1.85, 1.25, 1.45, 1.05],
         vertical_alignment="center",
     )
 
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V11.3</div>
-            <div class="terminal-subtitle">RSI panic rebound candidates.</div>
+            <div class="terminal-title">🔥 SwingIt V12</div>
+            <div class="terminal-subtitle">Scanner + Portfolio Command Center.</div>
             """,
             unsafe_allow_html=True,
         )
+
+    with top_workspace_col:
+        st.markdown("<div class='toolbar-label'>Workspace</div>", unsafe_allow_html=True)
+        workspace = st.selectbox(
+            "Workspace",
+            ["🔥 Scanner", "👑 My Portfolio"],
+            index=0,
+            label_visibility="collapsed",
+            key="workspace_selector",
+            help="Scanner finds new opportunities. My Portfolio manages active swing positions and exits.",
+        )
+        st.markdown("<div class='toolbar-help'>Hunt or manage</div>", unsafe_allow_html=True)
 
     with top_universe_col:
         st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
@@ -480,7 +512,7 @@ with st.container(border=True):
 
     with top_run_col:
         st.markdown("<div class='toolbar-label'>&nbsp;</div>", unsafe_allow_html=True)
-        run = st.button("🚀 Run Swing Scan", use_container_width=True)
+        run = st.button("🚀 Run Swing Scan", use_container_width=True, disabled=(st.session_state.get("workspace_selector") == "👑 My Portfolio"))
         st.markdown("<div class='run-note'>Use ToS for entries/exits.</div>", unsafe_allow_html=True)
 
 if universe == "Custom list":
@@ -4103,9 +4135,370 @@ def mini_chart(data):
     return fig
 
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# V12 Portfolio Command Center helpers
+# ──────────────────────────────────────────────────────────────────────────────
+PORTFOLIO_CSV_FILE = "portfolio.csv"
+PORTFOLIO_COLUMNS = ["Ticker", "Entry Price", "Entry Date", "Shares", "Profit Goal %"]
+
+
+def portfolio_to_csv_text(rows: list[dict]) -> str:
+    df = pd.DataFrame(rows, columns=PORTFOLIO_COLUMNS)
+    return df.to_csv(index=False)
+
+
+def load_portfolio() -> list[dict]:
+    key = "portfolio_rows_single_user"
+    if key in st.session_state:
+        return st.session_state[key]
+    rows = []
+    try:
+        if os.path.exists(PORTFOLIO_CSV_FILE):
+            df = pd.read_csv(PORTFOLIO_CSV_FILE)
+            for col in PORTFOLIO_COLUMNS:
+                if col not in df.columns:
+                    df[col] = ""
+            for _, r in df.iterrows():
+                t = _normalize_ticker(r.get("Ticker", ""))
+                if not t:
+                    continue
+                rows.append({
+                    "Ticker": t,
+                    "Entry Price": float(r.get("Entry Price", 0) or 0),
+                    "Entry Date": str(r.get("Entry Date", ""))[:10],
+                    "Shares": float(r.get("Shares", 0) or 0),
+                    "Profit Goal %": float(r.get("Profit Goal %", 8) or 8),
+                })
+    except Exception:
+        rows = []
+    st.session_state[key] = rows
+    return rows
+
+
+def save_portfolio(rows: list[dict]) -> None:
+    clean = []
+    seen = set()
+    for r in rows:
+        t = _normalize_ticker(r.get("Ticker", ""))
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        try:
+            entry = float(r.get("Entry Price", 0) or 0)
+        except Exception:
+            entry = 0
+        try:
+            shares = float(r.get("Shares", 0) or 0)
+        except Exception:
+            shares = 0
+        try:
+            goal = float(r.get("Profit Goal %", 8) or 8)
+        except Exception:
+            goal = 8
+        clean.append({
+            "Ticker": t,
+            "Entry Price": entry,
+            "Entry Date": str(r.get("Entry Date", ""))[:10],
+            "Shares": shares,
+            "Profit Goal %": goal,
+        })
+    st.session_state["portfolio_rows_single_user"] = clean
+    try:
+        with open(PORTFOLIO_CSV_FILE, "w", encoding="utf-8") as f:
+            f.write(portfolio_to_csv_text(clean))
+    except Exception:
+        st.warning("Could not write portfolio.csv in this environment. Download the updated CSV and commit it to GitHub if you want it permanent.")
+
+
+def load_portfolio_from_upload(uploaded_file) -> list[dict]:
+    if uploaded_file is None:
+        return []
+    try:
+        df = pd.read_csv(uploaded_file)
+        ticker_col = None
+        for c in df.columns:
+            if str(c).strip().lower() in ["ticker", "symbol"]:
+                ticker_col = c
+                break
+        if ticker_col is None:
+            ticker_col = df.columns[0]
+        rows = []
+        for _, r in df.iterrows():
+            t = _normalize_ticker(r.get(ticker_col, ""))
+            if not t:
+                continue
+            rows.append({
+                "Ticker": t,
+                "Entry Price": float(r.get("Entry Price", r.get("Entry", 0)) or 0),
+                "Entry Date": str(r.get("Entry Date", r.get("Date", "")))[:10],
+                "Shares": float(r.get("Shares", 0) or 0),
+                "Profit Goal %": float(r.get("Profit Goal %", r.get("Goal", 8)) or 8),
+            })
+        return rows
+    except Exception:
+        return []
+
+
+def timeframe_read(label: str, spring: dict, rsi_value=None) -> str:
+    s_label = clean_label(spring.get("spring_label", "No data"))
+    score = _to_float(spring.get("spring_score"), 0)
+    if score >= 80:
+        tone = "healthy / constructive"
+    elif score >= 60:
+        tone = "improving"
+    elif score >= 35:
+        tone = "mixed"
+    else:
+        tone = "weak"
+    rsi_txt = f" RSI is {rsi_value:.1f}." if isinstance(rsi_value, (float, int)) and not pd.isna(rsi_value) else ""
+    return f"{label}: {s_label} ({score:.0f}/100), currently {tone}.{rsi_txt} {spring.get('spring_reason', '')}"
+
+
+def _download_intraday_spring(ticker: str, interval_label: str) -> dict:
+    try:
+        raw = yf.download(ticker, period="60d", interval="1h", progress=False, auto_adjust=True, threads=False)
+        df = normalize_ohlcv(raw, ticker)
+        if df.empty:
+            return {"df": pd.DataFrame(), "spring": {"spring_score": 0, "spring_label": f"⚪ {interval_label} no data", "spring_reason": "No intraday data available."}, "rsi": None}
+        if interval_label == "4H":
+            tf_df = resample_to_4h(df)
+        else:
+            tf_df = df
+        spring = compute_ttm_spring(tf_df) if len(tf_df) >= 60 else {"spring_score": 0, "spring_label": f"⚪ {interval_label} no data", "spring_reason": "Not enough intraday history."}
+        try:
+            rsi = float(ta.momentum.RSIIndicator(tf_df["Close"].astype(float), window=14).rsi().dropna().iloc[-1])
+        except Exception:
+            rsi = None
+        return {"df": tf_df, "spring": spring, "rsi": rsi}
+    except Exception as e:
+        return {"df": pd.DataFrame(), "spring": {"spring_score": 0, "spring_label": f"⚪ {interval_label} failed", "spring_reason": f"Could not calculate {interval_label}: {e}"}, "rsi": None}
+
+
+def portfolio_chart(df: pd.DataFrame, title: str, entry_price=None, target_price=None):
+    if df is None or df.empty:
+        return None
+    chart_df = df.tail(90).copy()
+    close = chart_df["Close"].astype(float).squeeze()
+    dates = chart_df.index
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32], vertical_spacing=0.06, subplot_titles=(title, "RSI (14)"))
+    fig.add_trace(go.Candlestick(x=dates, open=chart_df["Open"].squeeze(), high=chart_df["High"].squeeze(), low=chart_df["Low"].squeeze(), close=close, name="Price"), row=1, col=1)
+    if entry_price and entry_price > 0:
+        fig.add_hline(y=entry_price, line=dict(color="#64748b", dash="dot", width=1), annotation_text="Entry", row=1, col=1)
+    if target_price and target_price > 0:
+        fig.add_hline(y=target_price, line=dict(color="#16803c", dash="dot", width=1), annotation_text="Target", row=1, col=1)
+    try:
+        rsi = ta.momentum.RSIIndicator(close, window=14).rsi()
+        fig.add_trace(go.Scatter(x=dates, y=rsi, name="RSI", line=dict(width=1.5)), row=2, col=1)
+        fig.add_hline(y=70, line=dict(color="#b42318", dash="dot", width=1), row=2, col=1)
+        fig.add_hline(y=30, line=dict(color="#16803c", dash="dot", width=1), row=2, col=1)
+    except Exception:
+        pass
+    fig.update_layout(height=430, paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font=dict(color="#334155", size=10), xaxis_rangeslider_visible=False, margin=dict(l=8, r=8, t=36, b=8), showlegend=False)
+    for i in range(1, 3):
+        fig.update_xaxes(gridcolor="#e2e8f0", row=i, col=1)
+        fig.update_yaxes(gridcolor="#e2e8f0", row=i, col=1)
+    return fig
+
+
+def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: dict) -> dict:
+    entry = float(position.get("Entry Price", 0) or 0)
+    goal = float(position.get("Profit Goal %", 8) or 8)
+    price = _to_float(candidate.get("price"), 0)
+    gain_pct = ((price - entry) / entry * 100) if entry > 0 and price > 0 else 0
+    progress = clamp((gain_pct / goal) * 100) if goal > 0 else 0
+    opp_remaining = _to_float(candidate.get("opportunity_remaining_pct"), 0)
+    current_rsi = _to_float(candidate.get("current_rsi"), 0)
+    daily_score = _to_float(candidate.get("spring_score"), 0)
+    fourh_score = _to_float(fourh.get("spring", {}).get("spring_score"), 0)
+    oneh_score = _to_float(oneh.get("spring", {}).get("spring_score"), 0)
+    market_read = clean_label(candidate.get("analyst_verdict", ""))
+    red_flag = clean_label(candidate.get("red_flag_label", ""))
+
+    exit_assistant_active = progress >= 80 or opp_remaining <= 25 or fourh_score < 45
+
+    broken = ("broken" in market_read.lower() or "fundamental" in market_read.lower() or "red" in red_flag.lower())
+    if broken and gain_pct < goal:
+        verdict = "🚨 Exit Early"
+        klass = "decision-red"
+        confidence = "High"
+        reason = "The trade story may be weakening because the market/news read includes a fundamental or red-flag warning."
+        window = "Now / next session"
+    elif gain_pct >= goal and (oneh_score < 45 or opp_remaining <= 20 or current_rsi >= 68):
+        verdict = "🔴 Take Profit"
+        klass = "decision-red"
+        confidence = "High"
+        reason = "Your goal has been reached and the short timeframe or remaining-opportunity read suggests the easy part of the move may be ending."
+        window = "Today to next 1 trading day"
+    elif progress >= 80 and (oneh_score < 60 or fourh_score < 55 or opp_remaining <= 30):
+        verdict = "🟡 Trim Soon"
+        klass = "decision-yellow"
+        confidence = "Moderate"
+        reason = "The trade is near the harvest zone. Use the 1H chart to fine-tune whether to exit this morning, afternoon, or next session."
+        window = "0–2 trading days"
+    elif gain_pct > goal and fourh_score >= 65 and oneh_score >= 60:
+        verdict = "🚀 Let Winner Run"
+        klass = "decision-blue"
+        confidence = "Moderate"
+        reason = "The goal has been reached, but 4H and 1H momentum still look constructive. Consider trailing rather than selling blindly."
+        window = "1–4 trading days, if momentum holds"
+    elif fourh_score >= 60 and daily_score >= 35 and opp_remaining >= 30:
+        verdict = "🟢 Hold Strong"
+        klass = "decision-green"
+        confidence = "Moderate"
+        reason = "The position still has room and the tactical trend has not shown enough weakness to force an exit."
+        window = "3–10 trading days, if the setup continues"
+    else:
+        verdict = "👀 Monitor"
+        klass = "decision-blue"
+        confidence = "Moderate"
+        reason = "The trade is still developing. Watch whether 4H momentum improves or rolls over before changing the plan."
+        window = "Reassess daily"
+
+    if not exit_assistant_active and verdict in ["🟢 Hold Strong", "👀 Monitor"]:
+        oneh_note = "1H Exit Assistant is not fully active yet because the trade is not near the profit goal or exhaustion zone."
+    else:
+        oneh_note = "1H Exit Assistant is active: use the 1H read to fine-tune sell timing."
+
+    trade_story = (
+        f"You entered at ${entry:.2f}; current price is about ${price:.2f}, a {gain_pct:+.2f}% move toward your {goal:.1f}% goal. "
+        f"Opportunity remaining is estimated near {opp_remaining:.0f}%. Daily spring is {clean_label(candidate.get('spring_label','—'))}; "
+        f"4H is {clean_label(fourh.get('spring',{}).get('spring_label','—'))}; 1H is {clean_label(oneh.get('spring',{}).get('spring_label','—'))}."
+    )
+
+    return {
+        "verdict": verdict,
+        "klass": klass,
+        "confidence": confidence,
+        "reason": reason,
+        "window": window,
+        "gain_pct": gain_pct,
+        "progress_pct": progress,
+        "oneh_note": oneh_note,
+        "exit_assistant_active": exit_assistant_active,
+        "trade_story": trade_story,
+    }
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def compute_portfolio_deep(ticker: str, entry_price: float, entry_date: str, goal_pct: float):
+    candidate = compute_candidate(ticker, goal_pct or 8, 30, True, "1D", force_deep=True)
+    if not candidate:
+        return None
+    fourh = _download_intraday_spring(ticker, "4H")
+    oneh = _download_intraday_spring(ticker, "1H")
+    analysis = portfolio_exit_analysis(candidate, {"Entry Price": entry_price, "Entry Date": entry_date, "Profit Goal %": goal_pct}, fourh, oneh)
+    return {"candidate": candidate, "fourh": fourh, "oneh": oneh, "analysis": analysis}
+
+
+def render_portfolio_command_center():
+    st.markdown("## 👑 My Portfolio Command Center")
+    st.caption("Manage active swing positions. Scanner finds entries; Portfolio helps you decide whether to hold, trim, sell, or reassess.")
+
+    rows = load_portfolio()
+    with st.container(border=True):
+        st.markdown("### Portfolio List")
+        edit_df = pd.DataFrame(rows, columns=PORTFOLIO_COLUMNS)
+        if edit_df.empty:
+            edit_df = pd.DataFrame(columns=PORTFOLIO_COLUMNS)
+        edited = st.data_editor(
+            edit_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Ticker": st.column_config.TextColumn(required=True),
+                "Entry Price": st.column_config.NumberColumn(format="$%.2f", min_value=0.0),
+                "Entry Date": st.column_config.TextColumn(help="YYYY-MM-DD"),
+                "Shares": st.column_config.NumberColumn(format="%.4f", min_value=0.0),
+                "Profit Goal %": st.column_config.NumberColumn(format="%.1f%%", min_value=1.0, max_value=100.0),
+            },
+            key="portfolio_editor",
+        )
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            if st.button("💾 Save Portfolio", use_container_width=True):
+                save_portfolio(edited.to_dict("records"))
+                st.success("Portfolio saved for this app session/file.")
+                st.rerun()
+        with c2:
+            uploaded = st.file_uploader("Import portfolio CSV", type=["csv"], label_visibility="collapsed")
+            if uploaded is not None:
+                save_portfolio(load_portfolio_from_upload(uploaded))
+                st.success("Imported portfolio.csv")
+                st.rerun()
+        with c3:
+            st.download_button("⬇ Download portfolio.csv", data=portfolio_to_csv_text(edited.to_dict("records")), file_name="portfolio.csv", mime="text/csv", use_container_width=True)
+
+    rows = load_portfolio()
+    if not rows:
+        st.info("Add 1–5 active swing positions above. Example columns: Ticker, Entry Price, Entry Date, Shares, Profit Goal %. Then save and refresh the analysis.")
+        return
+
+    st.markdown("### Active Position Deep Dives")
+    for pos in rows[:8]:
+        ticker = _normalize_ticker(pos.get("Ticker", ""))
+        if not ticker:
+            continue
+        with st.spinner(f"Deep-diving {ticker}…"):
+            data = compute_portfolio_deep(ticker, float(pos.get("Entry Price", 0) or 0), str(pos.get("Entry Date", "")), float(pos.get("Profit Goal %", 8) or 8))
+        if not data:
+            st.warning(f"Could not analyze {ticker}.")
+            continue
+        c = data["candidate"]
+        analysis = data["analysis"]
+        fourh = data["fourh"]
+        oneh = data["oneh"]
+        company = c.get("company_name") or ticker
+        with st.container():
+            st.markdown("<div class='portfolio-card'>", unsafe_allow_html=True)
+            st.markdown(f"<div class='portfolio-title'>{ticker} <span class='company-name'>{html.escape(str(company))}</span></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='portfolio-subtitle'>Entry ${float(pos.get('Entry Price',0) or 0):.2f} · Goal {float(pos.get('Profit Goal %',8) or 8):.1f}% · Entry date {html.escape(str(pos.get('Entry Date','—') or '—'))}</div>", unsafe_allow_html=True)
+            st.markdown(f"<span class='decision-pill {analysis['klass']}'>{analysis['verdict']} · Confidence {analysis['confidence']}</span>", unsafe_allow_html=True)
+            st.markdown(f"<div class='read-box'><div class='read-title'>🧠 Trade Story</div><div class='read-text'>{html.escape(analysis['trade_story'])}</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='read-box'><div class='read-title'>⏳ Exit Window</div><div class='read-text'><strong>{html.escape(analysis['window'])}</strong><br>{html.escape(analysis['reason'])}<br>{html.escape(analysis['oneh_note'])}</div></div>", unsafe_allow_html=True)
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Current", f"${c.get('price', 0):.2f}")
+            m2.metric("Gain", f"{analysis['gain_pct']:+.2f}%")
+            m3.metric("Goal progress", f"{analysis['progress_pct']:.0f}%")
+            m4.metric("Target", f"${c.get('potential_sell_price') or 0:.2f}")
+            m5.metric("Remaining", f"{_to_float(c.get('opportunity_remaining_pct'),0):.0f}%")
+
+            st.markdown("#### Timeframe Reads")
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                st.markdown("<div class='read-box'><div class='read-title'>🌎 1D Thesis Health</div><div class='read-text'>" + html.escape(timeframe_read("Daily", {"spring_score": c.get("spring_score", 0), "spring_label": c.get("spring_label"), "spring_reason": c.get("spring_reason")}, c.get("current_rsi"))) + "</div></div>", unsafe_allow_html=True)
+            with r2:
+                st.markdown("<div class='read-box'><div class='read-title'>🎯 4H Trade Management</div><div class='read-text'>" + html.escape(timeframe_read("4H", fourh.get("spring", {}), fourh.get("rsi"))) + "</div></div>", unsafe_allow_html=True)
+            with r3:
+                st.markdown("<div class='read-box'><div class='read-title'>⏱️ 1H Exit Timing</div><div class='read-text'>" + html.escape(timeframe_read("1H", oneh.get("spring", {}), oneh.get("rsi"))) + "</div></div>", unsafe_allow_html=True)
+
+            st.markdown("#### Market + News Read")
+            st.markdown(f"<div class='read-box'><div class='read-title'>🧠 Market Read: {html.escape(clean_label(c.get('analyst_verdict','—')))}</div><div class='read-text'>{html.escape(str(c.get('analyst_note','No analyst note available.')))}</div></div>", unsafe_allow_html=True)
+
+            with st.expander(f"Charts for {ticker}: 1D, 4H, 1H", expanded=False):
+                ca, cb, cc = st.columns(3)
+                with ca:
+                    fig = portfolio_chart(c.get("df"), f"{ticker} 1D", float(pos.get("Entry Price",0) or 0), c.get("potential_sell_price"))
+                    if fig: st.plotly_chart(fig, use_container_width=True)
+                with cb:
+                    fig = portfolio_chart(fourh.get("df"), f"{ticker} 4H", float(pos.get("Entry Price",0) or 0), c.get("potential_sell_price"))
+                    if fig: st.plotly_chart(fig, use_container_width=True)
+                with cc:
+                    fig = portfolio_chart(oneh.get("df"), f"{ticker} 1H", float(pos.get("Entry Price",0) or 0), c.get("potential_sell_price"))
+                    if fig: st.plotly_chart(fig, use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
+# Portfolio workspace short-circuits the scanner UI.
+if st.session_state.get("workspace_selector") == "👑 My Portfolio":
+    render_portfolio_command_center()
+    st.stop()
+
 # Morning Report landing action
 run_morning_report = False
 if st.session_state.scan_results is None and not run:
