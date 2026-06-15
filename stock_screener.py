@@ -1,5 +1,5 @@
 """
-SwingIt V11.2.3.2.1 — Analyst Verdict Calibration
+SwingIt V11.3 — Fast Scan + Conservative Targets
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V11.1",
+    page_title="SwingIt V11.3",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -380,7 +380,7 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V11.1</div>
+            <div class="terminal-title">🔥 SwingIt V11.3</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
@@ -460,6 +460,12 @@ with st.container(border=True):
                 "News/catalyst score",
                 value=True,
                 help="Adds lightweight Yahoo Finance headline scoring. Turn off if a large scan feels slow."
+            )
+            deep_scan_top_n = st.select_slider(
+                "Deep scan candidates",
+                options=[50, 100, 150, 200, 300, 500],
+                value=150,
+                help="Fast Scan checks the full universe with daily data first, then runs expensive 4H/news analysis only on the best candidates. Raise this for broader coverage; lower it for speed."
             )
             max_workers = st.select_slider(
                 "Scan speed",
@@ -1455,17 +1461,15 @@ def opportunity_label(current_rsi):
     return "Extended"
 
 
-def opportunity_remaining_from_cycle(current_price, cycle_low_price, avg_max_bounce_pct):
-    """Estimate how much of the historical rebound move remains in the current RSI panic cycle.
+def opportunity_remaining_from_cycle(current_price, cycle_low_price, avg_max_bounce_pct=None, target_price=None):
+    """Estimate how much of the current RSI-panic rebound remains.
 
-    Anchor = most recent RSI<30 event low close.
-    Target = anchor low close plus the stock's average max rebound after prior RSI panic events.
-    This avoids ranking names that already made most of their usual move.
+    Prefer a pre-computed conservative target when supplied. This avoids projecting
+    unrealistic targets from a tiny historical sample or one unusually large prior bounce.
     """
     try:
         current = float(current_price)
         low = float(cycle_low_price)
-        bounce = float(avg_max_bounce_pct)
     except Exception:
         return {
             "opportunity_remaining_pct": None,
@@ -1476,17 +1480,34 @@ def opportunity_remaining_from_cycle(current_price, cycle_low_price, avg_max_bou
             "move_completed_pct": None,
         }
 
-    if low <= 0 or bounce <= 0:
+    if low <= 0:
         return {
             "opportunity_remaining_pct": None,
             "opportunity_remaining_score": 0,
             "opportunity_remaining_label": "⚪ No cycle target",
-            "cycle_low_price": low if low > 0 else None,
+            "cycle_low_price": None,
             "cycle_target_price": None,
             "move_completed_pct": None,
         }
 
-    target = low * (1 + bounce / 100.0)
+    try:
+        if target_price is not None and float(target_price) > low:
+            target = float(target_price)
+        else:
+            bounce = float(avg_max_bounce_pct)
+            if bounce <= 0:
+                raise ValueError("bad bounce")
+            target = low * (1 + bounce / 100.0)
+    except Exception:
+        return {
+            "opportunity_remaining_pct": None,
+            "opportunity_remaining_score": 0,
+            "opportunity_remaining_label": "⚪ No cycle target",
+            "cycle_low_price": round(low, 2),
+            "cycle_target_price": None,
+            "move_completed_pct": None,
+        }
+
     total_move = target - low
     if total_move <= 0:
         remaining = None
@@ -1519,6 +1540,138 @@ def opportunity_remaining_from_cycle(current_price, cycle_low_price, avg_max_bou
         "move_completed_pct": round(completed, 1) if completed is not None else None,
     }
 
+
+def conservative_target_from_rebound_history(current_price, close, rebounds, profit_target=8, bounce_days=30):
+    """Build a more realistic swing target from the current RSI panic cycle.
+
+    Old behavior used average historical bounce from the *current* price, which could
+    overstate targets when there was only one huge prior event. This version anchors
+    the target to the current panic-cycle low and caps it by the recent pre-panic
+    trading range, so a one-off 25% historical bounce cannot imply a return to
+    unrealistic/all-time-high levels after a smaller current selloff.
+    """
+    empty = {
+        "target_price": None,
+        "target_gain_pct_from_current": None,
+        "target_bounce_pct_from_low": None,
+        "target_reason": "No reliable RSI panic-cycle target is available.",
+        "target_confidence": "Low",
+        "target_method": "No target",
+        "cycle_low_price": None,
+        "cycle_low_date": None,
+        "pre_panic_high": None,
+        "history_bounce_pct_used": None,
+        "recent_damage_cap_pct": None,
+    }
+    try:
+        current = float(current_price)
+    except Exception:
+        return empty
+
+    events = rebounds.get("events") or []
+    if not events:
+        return empty
+
+    recent_event = events[-1]
+    low = recent_event.get("Low Close")
+    low_date = recent_event.get("RSI Low Date")
+    try:
+        low = float(low)
+    except Exception:
+        return empty
+    if low <= 0:
+        return empty
+
+    bounce_col = f"Max {int(bounce_days)}D Bounce %"
+    event_bounces = []
+    for e in events:
+        val = e.get(bounce_col)
+        try:
+            if val is not None and not pd.isna(val) and float(val) > 0:
+                event_bounces.append(float(val))
+        except Exception:
+            pass
+    if not event_bounces:
+        return {**empty, "cycle_low_price": round(low, 2), "cycle_low_date": low_date}
+
+    event_count = len(event_bounces)
+    avg_bounce = float(pd.Series(event_bounces).mean())
+    median_bounce = float(pd.Series(event_bounces).median())
+
+    # Sample-size shrinkage: one giant historical bounce should be treated as a clue,
+    # not as a full forecast. More observations allow the history to speak louder.
+    if event_count == 1:
+        history_bounce = min(median_bounce, max(float(profit_target) + 2, 10.0))
+        target_confidence = "Low"
+        method = "single-event capped"
+    elif event_count == 2:
+        history_bounce = min(median_bounce, max(float(profit_target) + 5, 13.0))
+        target_confidence = "Low/Medium"
+        method = "two-event median capped"
+    else:
+        history_bounce = 0.65 * median_bounce + 0.35 * avg_bounce
+        cap = max(float(profit_target) * 2.5, 18.0)
+        history_bounce = min(history_bounce, cap)
+        target_confidence = "High" if event_count >= 6 else "Medium"
+        method = "median-weighted history"
+
+    # Recent-damage cap: estimate the most realistic first recovery zone from the
+    # high before the current panic low. This keeps the target from overshooting the
+    # breakdown range when the historical sample was unusually explosive.
+    pre_panic_high = None
+    recent_damage_cap = None
+    try:
+        c = pd.Series(close).dropna().astype(float)
+        if low_date is not None:
+            # Convert date-like event date back to nearest index location.
+            candidates = [i for i, idx in enumerate(c.index) if getattr(idx, 'date', lambda: idx)() <= low_date]
+            low_pos = candidates[-1] if candidates else len(c) - 1
+        else:
+            low_pos = len(c) - 1
+        start = max(0, low_pos - 30)
+        before = c.iloc[start:low_pos + 1]
+        if not before.empty:
+            pre_panic_high = float(before.max())
+            if pre_panic_high > low:
+                recent_drop_pct = ((pre_panic_high / low) - 1) * 100.0
+                # First swing target is usually below the exact pre-panic high.
+                recent_damage_cap = max(float(profit_target) * 0.75, recent_drop_pct * 0.88)
+    except Exception:
+        pass
+
+    target_bounce = history_bounce
+    if recent_damage_cap is not None:
+        target_bounce = min(target_bounce, recent_damage_cap)
+
+    # Never let a target be below the user's selected goal if there is enough recent
+    # damage to reasonably allow it; but don't force 8% if the chart only fell 4%.
+    if recent_damage_cap is not None and recent_damage_cap >= float(profit_target):
+        target_bounce = max(target_bounce, float(profit_target))
+
+    target_price = low * (1 + target_bounce / 100.0)
+    gain_from_current = ((target_price / current) - 1) * 100.0 if current > 0 else None
+
+    reason_parts = [
+        f"Target is anchored to the current RSI panic low (${low:.2f})",
+        f"uses {method} from {event_count} historical event{'s' if event_count != 1 else ''}",
+    ]
+    if pre_panic_high is not None:
+        reason_parts.append(f"and is capped against the recent pre-panic range near ${pre_panic_high:.2f}")
+    reason = "; ".join(reason_parts) + "."
+
+    return {
+        "target_price": round(float(target_price), 2),
+        "target_gain_pct_from_current": round(float(gain_from_current), 2) if gain_from_current is not None else None,
+        "target_bounce_pct_from_low": round(float(target_bounce), 2),
+        "target_reason": reason,
+        "target_confidence": target_confidence,
+        "target_method": method,
+        "cycle_low_price": round(low, 2),
+        "cycle_low_date": low_date,
+        "pre_panic_high": round(pre_panic_high, 2) if pre_panic_high is not None else None,
+        "history_bounce_pct_used": round(history_bounce, 2),
+        "recent_damage_cap_pct": round(recent_damage_cap, 2) if recent_damage_cap is not None else None,
+    }
 
 def rebound_stage_from_series(close, rsi_series, spring_score=0, days_since_under_30=None):
     """Classify where the current RSI panic/rebound sits in its lifecycle.
@@ -2681,6 +2834,85 @@ def compute_ttm_spring(df: pd.DataFrame) -> dict:
         "squeeze_on_series": squeeze_on,
     }
 
+
+@st.cache_data(ttl=900, show_spinner=False)
+def compute_prescreen_candidate(ticker: str, profit_target: int, bounce_days: int):
+    """Fast daily-only pre-screen for very large universes.
+
+    It avoids hourly downloads and news lookups. The goal is not to produce final
+    cards; it simply decides which tickers deserve the expensive deep analysis.
+    """
+    try:
+        raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True, threads=False)
+        df = normalize_ohlcv(raw, ticker)
+        if df.empty or len(df) < 80:
+            return None
+        close = df["Close"].astype(float)
+        volume = df["Volume"].astype(float)
+        current_price = float(close.iloc[-1])
+        rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
+        current_rsi = float(rsi_series.dropna().iloc[-1]) if not rsi_series.dropna().empty else None
+        if current_rsi is None:
+            return None
+
+        rebounds = analyze_rsi_swing_outcomes(close, rsi_series, profit_target=profit_target, bounce_days=bounce_days)
+        history_score = rebounds.get("history_score", 0)
+        opp_score = current_rsi_opportunity_score(current_rsi)
+
+        valid_rsi = rsi_series.dropna()
+        under_30_positions = [idx for idx, val in enumerate(rsi_series) if pd.notna(val) and val < 30]
+        days_since_rsi_under_30 = None
+        if under_30_positions:
+            last_under_pos = under_30_positions[-1]
+            days_since_rsi_under_30 = len(rsi_series) - 1 - last_under_pos
+
+        rebound_stage_score, rebound_stage_label, _ = rebound_stage_from_series(
+            close, rsi_series, 0, days_since_rsi_under_30
+        )
+        panic = panic_shock_from_df(close, volume, lookback_days=15)
+        avg_vol_20d = float(volume.tail(20).mean()) if len(volume) else None
+        current_volume = float(volume.iloc[-1]) if len(volume) else None
+        volume_ratio = (current_volume / avg_vol_20d) if avg_vol_20d and avg_vol_20d > 0 and current_volume else None
+        attention_score = _volume_score_from_ratio(volume_ratio)
+        volume_trend_score, _, _ = volume_trend_from_series(volume)
+
+        target_model = conservative_target_from_rebound_history(
+            current_price, close, rebounds, profit_target=profit_target, bounce_days=bounce_days
+        )
+        opp_remaining = opportunity_remaining_from_cycle(
+            current_price,
+            target_model.get("cycle_low_price"),
+            rebounds.get("avg_max_bounce_pct"),
+            target_price=target_model.get("target_price"),
+        )
+
+        # Daily-only fast score: broad enough to keep hidden gems, strict enough to
+        # avoid spending time on obvious non-candidates.
+        fast_score = int(round(clamp(
+            0.30 * history_score +
+            0.24 * opp_score +
+            0.16 * rebound_stage_score +
+            0.14 * opp_remaining.get("opportunity_remaining_score", 0) +
+            0.10 * panic.get("panic_shock_score", 0) +
+            0.04 * attention_score +
+            0.02 * volume_trend_score
+        )))
+
+        return {
+            "ticker": ticker,
+            "fast_score": fast_score,
+            "price": round(current_price, 2),
+            "current_rsi": round(current_rsi, 1),
+            "history_score": history_score,
+            "rebound_stage_score": int(round(rebound_stage_score)),
+            "rebound_stage_label": rebound_stage_label,
+            "opportunity_remaining_score": opp_remaining.get("opportunity_remaining_score", 0),
+            "panic_shock_score": panic.get("panic_shock_score", 0),
+            "volume_ratio": round(float(volume_ratio), 2) if volume_ratio is not None else None,
+        }
+    except Exception:
+        return None
+
 @st.cache_data(ttl=300, show_spinner=False)
 def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include_news_lookup: bool = True, spring_timeframe: str = "1D"):
     try:
@@ -2798,18 +3030,22 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             close, rsi_series, spring.get("spring_score", 0), days_since_rsi_under_30
         )
 
-        potential_sell_price = None
-        if rebounds.get("avg_max_bounce_pct") is not None:
-            potential_sell_price = current_price * (1 + float(rebounds["avg_max_bounce_pct"]) / 100)
+        # Conservative target: anchor to the most recent RSI panic low, shrink/cap tiny samples,
+        # and cap against the recent pre-panic range so one huge old event cannot create an
+        # unrealistic all-time-high style target.
+        target_model = conservative_target_from_rebound_history(
+            current_price,
+            close,
+            rebounds,
+            profit_target=profit_target,
+            bounce_days=bounce_days,
+        )
+        potential_sell_price = target_model.get("target_price")
 
         # Opportunity Remaining answers: if this is the current RSI panic cycle,
-        # how much of its usual historical rebound is still left from the RSI-event low?
-        recent_cycle_low_price = None
-        recent_cycle_low_date = None
-        if rebounds.get("events"):
-            recent_event = rebounds["events"][-1]
-            recent_cycle_low_price = recent_event.get("Low Close")
-            recent_cycle_low_date = recent_event.get("RSI Low Date")
+        # how much of its conservative rebound target is still left from the RSI-event low?
+        recent_cycle_low_price = target_model.get("cycle_low_price")
+        recent_cycle_low_date = target_model.get("cycle_low_date")
 
         # V10.6 fix: stabilization must be calculated BEFORE Setup Quality uses it.
         # The earlier build referenced stabilization too early, causing every candidate
@@ -2821,6 +3057,7 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             current_price,
             recent_cycle_low_price,
             rebounds.get("avg_max_bounce_pct"),
+            target_price=target_model.get("target_price"),
         )
 
         # Swing Score = historical rebound candidate quality.
@@ -2866,6 +3103,14 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "ticker": ticker,
             "price": round(current_price, 2),
             "potential_sell_price": round(float(potential_sell_price), 2) if potential_sell_price is not None else None,
+            "target_gain_pct_from_current": target_model.get("target_gain_pct_from_current"),
+            "target_bounce_pct_from_low": target_model.get("target_bounce_pct_from_low"),
+            "target_reason": target_model.get("target_reason"),
+            "target_confidence": target_model.get("target_confidence"),
+            "target_method": target_model.get("target_method"),
+            "pre_panic_high": target_model.get("pre_panic_high"),
+            "history_bounce_pct_used": target_model.get("history_bounce_pct_used"),
+            "recent_damage_cap_pct": target_model.get("recent_damage_cap_pct"),
             "cycle_low_price": opp_remaining.get("cycle_low_price"),
             "cycle_low_date": recent_cycle_low_date,
             "cycle_target_price": opp_remaining.get("cycle_target_price"),
@@ -3529,6 +3774,7 @@ def hot_card(rank, row):
 
     current_price = row.get("Price", "—")
     potential_price = row.get("Potential Swing Price", "—")
+    target_gain_pct = row.get("Target Gain %", None)
     cycle_low_price = row.get("Cycle Low Price", "—")
     cycle_low_date = row.get("Cycle Low Date", "—")
     cycle_target_price = row.get("Cycle Target Price", "—")
@@ -3631,9 +3877,10 @@ def hot_card(rank, row):
     price_tip = f"""
         <strong>Price / target</strong><br>
         Current close: {_safe_html(current_price)}<br>
-        Potential swing price from current: {_safe_html(potential_price)}<br>
-        Cycle target from RSI panic low: {_safe_html(cycle_target_price)}<br><br>
-        The potential swing price uses the stock's average historical max bounce from the current price. The cycle target anchors the move to the most recent RSI panic low.
+        Conservative swing target: {_safe_html(potential_price)}<br>
+        Cycle target from RSI panic low: {_safe_html(cycle_target_price)}<br>
+        Target confidence: {_safe_html(row.get("Target Confidence", "—"))}<br><br>
+        {_safe_html(row.get("Target Reason", "Target is anchored to the current RSI panic low and capped to reduce single-event outliers."))}
     """
     remaining_tip = f"""
         <strong>Opportunity remaining</strong><br>
@@ -3662,10 +3909,13 @@ def hot_card(rank, row):
         This helps you compare the current selloff age against the stock's average days to max rebound. Lower RSI can be powerful, but it is not an entry signal by itself.
     """
     bounce_tip = f"""
-        <strong>Historical bounce behavior</strong><br>
-        Avg max bounce: {_safe_html(avg_max)}%<br>
+        <strong>Conservative target / historical bounce</strong><br>
+        Target gain from current: {_safe_html(row.get("Target Gain %", "—"))}%<br>
+        Target confidence: {_safe_html(row.get("Target Confidence", "—"))}<br>
+        Target method: {_safe_html(row.get("Target Method", "—"))}<br><br>
+        Historical avg max bounce: {_safe_html(avg_max)}%<br>
         Avg days to max bounce: {_safe_html(avg_days)} trading days<br><br>
-        This is based on prior RSI &lt;30 panic events and your selected swing window.
+        {_safe_html(row.get("Target Reason", "Target is anchored to the current RSI panic low and capped to reduce single-event outliers."))}
     """
 
     stage_tip = f"""
@@ -3763,7 +4013,7 @@ def hot_card(rank, row):
             {hover_item('Stage', clean_label(rebound_stage), stage_tip, dot=True)}
             {hover_item('Stabilization', clean_label(stabilization), stabilization_tip, dot=True)}
             {hover_item('4H Trigger', clean_label(trigger_4h), trigger_4h_tip, dot=True)}
-            {hover_item('Potential', f'+{avg_max}% in {avg_days}d avg', bounce_tip, dot=True)}
+            {hover_item('Potential', (f'+{target_gain_pct}% to target' if target_gain_pct is not None and not pd.isna(target_gain_pct) else f'+{avg_max}% in {avg_days}d avg'), bounce_tip, dot=True)}
             {hover_item('Remaining', clean_label(opportunity_remaining), remaining_tip, dot=True)}
             {hover_item('Overreaction', clean_label(overreaction), overreaction_tip, dot=True)}
             {hover_item('History', history, history_tip, dot=True)}
@@ -3912,6 +4162,7 @@ if run or run_morning_report:
         "include_news": include_news,
         "spring_timeframe": spring_timeframe,
         "scan_speed": max_workers,
+        "deep_scan_top_n": deep_scan_top_n,
         "tickers_scanned": len(tickers),
         "source_map": {t: source_map.get(t, []) for t in tickers},
         "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
@@ -3928,14 +4179,52 @@ if run or run_morning_report:
     cancel_box.caption("Tip: to stop a very large scan, use Streamlit's stop control or refresh the app. V8 stores completed results after the scan finishes.")
 
     results = []
-    completed = 0
 
-    # Parallel scan: keeps the UI responsive enough to show progress while reducing long universe waits.
-    # If a provider throttles requests, lower Scan speed in Model settings.
+    # V11.3 Fast Scan Engine:
+    # Pass 1 scans the full universe with cheap daily-only calculations.
+    # Pass 2 runs expensive 4H/news/full-card analysis only on the best candidates.
+    use_fast_scan = len(tickers) > int(deep_scan_top_n)
+    deep_tickers = tickers
+
+    if use_fast_scan:
+        prescreen = []
+        completed = 0
+        status.caption("Pass 1/2: fast daily pre-screen…")
+        with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
+            future_map = {
+                executor.submit(compute_prescreen_candidate, ticker, profit_target, bounce_window): ticker
+                for ticker in tickers
+            }
+            for future in as_completed(future_map):
+                ticker = future_map[future]
+                completed += 1
+                try:
+                    fast = future.result()
+                except Exception:
+                    fast = None
+                if fast:
+                    prescreen.append(fast)
+
+                status.caption(f"Pass 1/2 · Fast-scanned {completed:,} / {len(tickers):,} · Latest: {ticker} · Candidates: {len(prescreen):,}")
+                progress.progress(min((completed / len(tickers)) * 0.45, 0.45))
+
+                if prescreen and (completed % 50 == 0 or completed == len(tickers)):
+                    preview = sorted(prescreen, key=lambda r: float(r.get('fast_score', 0)), reverse=True)[:5]
+                    preview_text = " · ".join([f"{r.get('ticker')} {int(r.get('fast_score', 0))}" for r in preview])
+                    leaders_box.info(f"Fast-screen leaders: {preview_text}")
+
+        prescreen_sorted = sorted(prescreen, key=lambda r: float(r.get('fast_score', 0)), reverse=True)
+        deep_tickers = [r.get("ticker") for r in prescreen_sorted[:int(deep_scan_top_n)] if r.get("ticker")]
+        if not deep_tickers:
+            deep_tickers = tickers[:min(len(tickers), int(deep_scan_top_n))]
+        leaders_box.info(f"Pass 2/2: deep-analyzing top {len(deep_tickers):,} candidates from {len(tickers):,} scanned…")
+
+    completed = 0
+    total_deep = len(deep_tickers)
     with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
         future_map = {
             executor.submit(compute_candidate, ticker, profit_target, bounce_window, include_news, spring_timeframe): ticker
-            for ticker in tickers
+            for ticker in deep_tickers
         }
         for future in as_completed(future_map):
             ticker = future_map[future]
@@ -3947,10 +4236,14 @@ if run or run_morning_report:
             if candidate:
                 results.append(candidate)
 
-            status.caption(f"Scanned {completed:,} / {len(tickers):,} tickers · Latest: {ticker} · Usable: {len(results):,}")
-            progress.progress(min(completed / len(tickers), 1.0))
+            if use_fast_scan:
+                progress.progress(min(0.45 + (completed / max(total_deep, 1)) * 0.55, 1.0))
+                status.caption(f"Pass 2/2 · Deep-analyzed {completed:,} / {total_deep:,} · Latest: {ticker} · Usable: {len(results):,}")
+            else:
+                progress.progress(min(completed / max(total_deep, 1), 1.0))
+                status.caption(f"Scanned {completed:,} / {total_deep:,} tickers · Latest: {ticker} · Usable: {len(results):,}")
 
-            if results and (completed % 25 == 0 or completed == len(tickers)):
+            if results and (completed % 25 == 0 or completed == total_deep):
                 preview = sorted(results, key=lambda r: float(r.get('setup_quality', 0)), reverse=True)[:5]
                 preview_text = " · ".join([f"{r.get('ticker')} {int(r.get('setup_quality', 0))}" for r in preview])
                 leaders_box.info(f"Live leaders by Setup Quality: {preview_text}")
@@ -4033,6 +4326,14 @@ for r in results:
         "4H Momentum 3-Bar": r.get("trigger_4h_momentum_3bar"),
         "Price": r["price"],
         "Potential Swing Price": r.get("potential_sell_price"),
+        "Target Gain %": r.get("target_gain_pct_from_current"),
+        "Target Bounce From Low %": r.get("target_bounce_pct_from_low"),
+        "Target Confidence": r.get("target_confidence"),
+        "Target Method": r.get("target_method"),
+        "Target Reason": r.get("target_reason"),
+        "Pre-Panic High": r.get("pre_panic_high"),
+        "History Bounce Used %": r.get("history_bounce_pct_used"),
+        "Recent Damage Cap %": r.get("recent_damage_cap_pct"),
         "Cycle Low Price": r.get("cycle_low_price"),
         "Cycle Low Date": r.get("cycle_low_date"),
         "Cycle Target Price": r.get("cycle_target_price"),
@@ -4327,7 +4628,7 @@ with st.expander("What the Swing Score means"):
 
     **Confidence** is separate from Swing Score. Low confidence means only 1–2 prior RSI&lt;30 events, Medium means 3–5 events, and High means 6+ events.
 
-    **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
+    **Potential Swing Price** is a conservative RSI panic-cycle target, not an analyst target. It anchors to the most recent RSI panic low, shrinks tiny historical samples, and caps against the recent pre-panic range so one huge prior event does not create an unrealistic target.
 
     Current V11.1 uses multiple view-by lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (RSI opportunity, rebound stage, stabilization, catalyst/news, daily TTM spring, 4H trigger, attention/RVOL, and volume trend).
 
