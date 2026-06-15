@@ -4819,6 +4819,341 @@ def render_portfolio_command_center():
 
 
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# V13.1 Entry Hunter engine
+# ──────────────────────────────────────────────────────────────────────────────
+def _safe_float(x, default=None):
+    try:
+        if x is None or pd.isna(x):
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_market_cap_estimate(ticker: str):
+    """Best-effort market cap lookup for Entry Hunter quality gate."""
+    try:
+        t = yf.Ticker(ticker)
+        fi = getattr(t, "fast_info", {}) or {}
+        for key in ["market_cap", "marketCap"]:
+            try:
+                val = fi.get(key) if hasattr(fi, "get") else fi[key]
+                val = _safe_float(val)
+                if val and val > 0:
+                    return val
+            except Exception:
+                pass
+        info = getattr(t, "info", {}) or {}
+        val = _safe_float(info.get("marketCap"))
+        if val and val > 0:
+            return val
+    except Exception:
+        pass
+    return None
+
+
+def recent_fast_drop(close: pd.Series, lookback: int = 12, max_days: int = 7):
+    """Find the sharpest recent peak-to-trough close drop inside the lookback window."""
+    try:
+        c = close.dropna().astype(float)
+        if len(c) < max(lookback, 8):
+            return {"drop_pct": 0, "drop_days": None, "peak_date": None, "trough_date": None, "trough_price": None}
+        recent = c.tail(lookback)
+        best = {"drop_pct": 0, "drop_days": None, "peak_date": None, "trough_date": None, "trough_price": None}
+        vals = list(recent.values)
+        idxs = list(recent.index)
+        for i in range(len(vals)):
+            peak = vals[i]
+            if peak <= 0:
+                continue
+            for j in range(i + 1, min(len(vals), i + max_days + 1)):
+                trough = vals[j]
+                drop = (peak - trough) / peak * 100.0
+                if drop > best["drop_pct"]:
+                    best = {
+                        "drop_pct": float(drop),
+                        "drop_days": int(j - i),
+                        "peak_date": idxs[i].date() if hasattr(idxs[i], "date") else idxs[i],
+                        "trough_date": idxs[j].date() if hasattr(idxs[j], "date") else idxs[j],
+                        "trough_price": float(trough),
+                    }
+        return best
+    except Exception:
+        return {"drop_pct": 0, "drop_days": None, "peak_date": None, "trough_date": None, "trough_price": None}
+
+
+def macd_entry_state(close: pd.Series):
+    try:
+        c = close.dropna().astype(float)
+        if len(c) < 40:
+            return 0, "⚪ Not enough MACD data", "MACD needs more daily history."
+        macd_ind = ta.trend.MACD(c)
+        macd = macd_ind.macd()
+        sig = macd_ind.macd_signal()
+        diff = (macd - sig).dropna()
+        if len(diff) < 5:
+            return 0, "⚪ Not enough MACD data", "MACD signal is unavailable."
+        now = float(diff.iloc[-1])
+        prev = float(diff.iloc[-2])
+        crossed_recent = any(float(diff.iloc[-k-1]) <= 0 and float(diff.iloc[-k]) > 0 for k in range(1, min(4, len(diff))))
+        improving_3 = float(diff.iloc[-1]) > float(diff.iloc[-2]) > float(diff.iloc[-3]) if len(diff) >= 3 else False
+        price = float(c.iloc[-1])
+        near_cross = now <= 0 and abs(now) / max(price, 1) < 0.006 and now > prev
+        if crossed_recent:
+            return 100, "🟢 Fresh bullish MACD cross", "MACD crossed bullish within the last few daily bars."
+        if near_cross and improving_3:
+            return 85, "🟢 MACD nearly crossed", "MACD is still slightly negative but converging upward quickly."
+        if improving_3:
+            return 65, "🟡 MACD improving", "MACD momentum is improving but has not reached a clean trigger."
+        if now > 0:
+            return 55, "🟡 MACD positive", "MACD is positive, but the freshest crossover may have already passed."
+        return 20, "🔴 MACD weak", "MACD is not converging upward yet."
+    except Exception:
+        return 0, "⚪ MACD unavailable", "MACD calculation failed."
+
+
+def ema_entry_state(close: pd.Series):
+    try:
+        c = close.dropna().astype(float)
+        if len(c) < 25:
+            return 0, "⚪ Not enough EMA data", "EMA needs more daily history."
+        ema9 = ta.trend.EMAIndicator(c, window=9).ema_indicator()
+        ema15 = ta.trend.EMAIndicator(c, window=15).ema_indicator()
+        diff = (ema9 - ema15).dropna()
+        if len(diff) < 5:
+            return 0, "⚪ EMA unavailable", "EMA signal is unavailable."
+        now = float(diff.iloc[-1])
+        prev = float(diff.iloc[-2])
+        crossed_recent = any(float(diff.iloc[-k-1]) <= 0 and float(diff.iloc[-k]) > 0 for k in range(1, min(4, len(diff))))
+        improving_3 = float(diff.iloc[-1]) > float(diff.iloc[-2]) > float(diff.iloc[-3]) if len(diff) >= 3 else False
+        price = float(c.iloc[-1])
+        near_cross = now <= 0 and abs(now) / max(price, 1) < 0.01 and now > prev
+        if crossed_recent:
+            return 100, "🟢 Fresh 9/15 EMA cross", "The 9 EMA crossed above the 15 EMA within the last few daily bars."
+        if near_cross and improving_3:
+            return 85, "🟢 EMA nearly crossed", "The 9 EMA is closing in on the 15 EMA and improving."
+        if now > 0 and improving_3:
+            return 75, "🟡 EMA bullish and improving", "The 9 EMA is above the 15 EMA and still improving."
+        if now > 0:
+            return 60, "🟡 EMA bullish", "The 9 EMA is above the 15 EMA, but the cross may not be fresh."
+        return 20, "🔴 EMA not ready", "The 9 EMA has not started reclaiming the 15 EMA yet."
+    except Exception:
+        return 0, "⚪ EMA unavailable", "EMA calculation failed."
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days: int, include_news_lookup: bool = True):
+    """Entry Hunter: intentionally picky weekly swing-entry detector.
+
+    It first checks the actual entry recipe cheaply, then pulls the deeper
+    scanner/news read only for stocks that have a real shot.
+    """
+    try:
+        market_cap = get_market_cap_estimate(ticker)
+        if market_cap is not None and market_cap < 2_000_000_000:
+            return None
+
+        raw = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True, threads=False)
+        df = normalize_ohlcv(raw, ticker)
+        if df.empty or len(df) < 90:
+            return None
+        close = df["Close"].astype(float)
+        volume = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(index=df.index, dtype=float)
+        current_price = float(close.iloc[-1])
+
+        drop = recent_fast_drop(close, lookback=12, max_days=7)
+        drop_pct = float(drop.get("drop_pct") or 0)
+        drop_days = drop.get("drop_days")
+        if drop_pct < 5 or drop_pct > 30:
+            return None
+
+        rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
+        valid_rsi = rsi_series.dropna()
+        if valid_rsi.empty:
+            return None
+        current_rsi = float(valid_rsi.iloc[-1])
+        under_positions = [i for i, v in enumerate(rsi_series) if pd.notna(v) and v < 30]
+        if not under_positions:
+            return None
+        days_since_under = len(rsi_series) - 1 - under_positions[-1]
+        rsi_low_recent = float(rsi_series.iloc[max(0, len(rsi_series)-45):].min())
+        rsi_recovered = days_since_under <= 35 and current_rsi > 30 and current_rsi <= 55
+        if not rsi_recovered:
+            return None
+        # Sweet spot is above oversold but not already hot.
+        if 35 <= current_rsi <= 45:
+            rsi_score = 100
+        elif 30 < current_rsi < 35:
+            rsi_score = 85
+        elif 45 < current_rsi <= 50:
+            rsi_score = 80
+        else:
+            rsi_score = 55
+
+        macd_score, macd_label, macd_reason = macd_entry_state(close)
+        ema_score, ema_label, ema_reason = ema_entry_state(close)
+
+        # 4H trigger is the most important timing layer.
+        fourh = _download_intraday_spring(ticker, "4H")
+        fourh_spring = fourh.get("spring", {}) if isinstance(fourh, dict) else {}
+        fourh_score = float(fourh_spring.get("spring_score", 0) or 0)
+        fourh_label = fourh_spring.get("spring_label", "⚪ 4H unavailable")
+        fourh_reason = fourh_spring.get("spring_reason", "4H trigger unavailable.")
+
+        # Entry Hunter should not surface names where the 4H is still truly ugly.
+        fourh_text = str(fourh_label).lower()
+        if fourh_score < 45 and not any(x in fourh_text for x in ["early", "turn", "improving", "fired"]):
+            return None
+
+        # Panic quality favors a quick, meaningful, but not catastrophic drop.
+        if 8 <= drop_pct <= 20 and drop_days is not None and drop_days <= 5:
+            panic_quality = 100
+        elif 5 <= drop_pct <= 25 and drop_days is not None and drop_days <= 7:
+            panic_quality = 80
+        else:
+            panic_quality = 55
+
+        entry_score = int(round(clamp(
+            0.30 * fourh_score +
+            0.25 * rsi_score +
+            0.20 * panic_quality +
+            0.15 * ema_score +
+            0.10 * macd_score
+        )))
+        if entry_score < 70:
+            return None
+
+        deep = compute_candidate(ticker, profit_target, bounce_days, include_news_lookup, "1D") or {}
+        result = dict(deep) if deep else {"ticker": ticker, "price": round(current_price, 2), "df": df, "rsi_series": rsi_series}
+
+        if entry_score >= 92:
+            grade = "A+"
+        elif entry_score >= 85:
+            grade = "A"
+        elif entry_score >= 78:
+            grade = "B+"
+        else:
+            grade = "B"
+
+        setup_age_bits = []
+        setup_age_bits.append(f"RSI recovered {int(days_since_under)} trading days ago" if days_since_under is not None else "RSI recovery age unknown")
+        if "Fresh" in macd_label:
+            setup_age_bits.append("MACD crossed recently")
+        elif "nearly" in macd_label.lower():
+            setup_age_bits.append("MACD nearly crossed")
+        if "Fresh" in ema_label:
+            setup_age_bits.append("EMA crossed recently")
+        elif "nearly" in ema_label.lower():
+            setup_age_bits.append("EMA nearly crossed")
+        setup_age_bits.append(f"4H trigger: {clean_label(fourh_label)}")
+
+        why = (
+            f"{drop_pct:.1f}% drop in {drop_days or '?'} trading days; RSI recovered from {rsi_low_recent:.1f} to {current_rsi:.1f}; "
+            f"{clean_label(fourh_label)}; {clean_label(macd_label)}; {clean_label(ema_label)}."
+        )
+
+        result.update({
+            "ticker": ticker,
+            "price": round(current_price, 2),
+            "market_cap": market_cap,
+            "entry_score": entry_score,
+            "entry_grade": grade,
+            "entry_match_label": f"🏹 Entry Match {grade}",
+            "entry_why": why,
+            "entry_setup_age": " · ".join(setup_age_bits),
+            "entry_drop_pct": round(drop_pct, 2),
+            "entry_drop_days": drop_days,
+            "entry_drop_trough_date": drop.get("trough_date"),
+            "entry_rsi_low_recent": round(rsi_low_recent, 1),
+            "entry_current_rsi": round(current_rsi, 1),
+            "entry_rsi_score": int(round(rsi_score)),
+            "entry_panic_quality": int(round(panic_quality)),
+            "entry_macd_score": int(round(macd_score)),
+            "entry_macd_label": macd_label,
+            "entry_macd_reason": macd_reason,
+            "entry_ema_score": int(round(ema_score)),
+            "entry_ema_label": ema_label,
+            "entry_ema_reason": ema_reason,
+            "entry_4h_score": int(round(fourh_score)),
+            "entry_4h_label": fourh_label,
+            "entry_4h_reason": fourh_reason,
+            "fourh_entry_df": fourh.get("df") if isinstance(fourh, dict) else None,
+        })
+        return result
+    except Exception:
+        return None
+
+
+def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict | None = None):
+    st.markdown("## ⚡ Entry Hunter")
+    st.caption("A picky weekly-entry workspace: fast panic drop → RSI recovery → 4H trigger → MACD/EMA turn. Maximum 5 elite entries.")
+
+    if not results:
+        st.info("🦜 The kingdom is quiet. No elite Entry Hunter setups passed today. That can be the correct answer — patience protects the account.")
+        return
+
+    top = sorted(results, key=lambda r: float(r.get("entry_score", 0)), reverse=True)[:5]
+    st.markdown(f"### 🏹 Today's Elite Entries ({len(top)})")
+
+    for i, r in enumerate(top, start=1):
+        ticker = r.get("ticker", "—")
+        name = r.get("company_name") or r.get("shortName") or ticker
+        with st.container(border=True):
+            h1, h2, h3 = st.columns([2.2, 1, 1])
+            with h1:
+                st.markdown(f"### #{i} {ticker} — {name}")
+                st.markdown(f"**{r.get('entry_match_label', '🏹 Entry Match')}** · Score **{int(float(r.get('entry_score', 0)))}**")
+            with h2:
+                st.metric("Price", f"${_to_float(r.get('price'),0):.2f}")
+            with h3:
+                tgt = r.get("potential_sell_price")
+                st.metric("Target", f"${_to_float(tgt,0):.2f}" if tgt else "—")
+
+            st.markdown(f"**Why it qualifies:** {r.get('entry_why','—')}")
+            st.caption(f"Setup age: {r.get('entry_setup_age','—')}")
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Panic", f"{_to_float(r.get('entry_drop_pct'),0):.1f}%", f"{r.get('entry_drop_days') or '?'} days")
+            c2.metric("RSI", f"{_to_float(r.get('entry_current_rsi'),0):.1f}", f"low {_to_float(r.get('entry_rsi_low_recent'),0):.1f}")
+            c3.metric("4H Trigger", f"{int(_to_float(r.get('entry_4h_score'),0))}", clean_label(r.get('entry_4h_label','—'))[:22])
+            c4.metric("MACD", f"{int(_to_float(r.get('entry_macd_score'),0))}", clean_label(r.get('entry_macd_label','—'))[:22])
+            c5.metric("EMA 9/15", f"{int(_to_float(r.get('entry_ema_score'),0))}", clean_label(r.get('entry_ema_label','—'))[:22])
+
+            st.markdown("#### Market Read")
+            event = r.get("event_type") or "No major event detected"
+            excuse = r.get("market_excuse") or r.get("catalyst_reason") or "No clear market excuse found."
+            verdict = r.get("analyst_verdict") or "Market read unavailable"
+            note = r.get("analyst_note") or r.get("reaction_analysis") or "No deeper news note available."
+            st.markdown(f"**Event:** {event}  \n**Market's Excuse:** {excuse}  \n**Verdict:** {verdict}  \n{note}")
+
+            with st.expander("Deep entry details", expanded=False):
+                st.write({
+                    "Entry Score": r.get("entry_score"),
+                    "Panic Quality": r.get("entry_panic_quality"),
+                    "RSI Score": r.get("entry_rsi_score"),
+                    "4H Trigger": r.get("entry_4h_reason"),
+                    "MACD": r.get("entry_macd_reason"),
+                    "EMA": r.get("entry_ema_reason"),
+                    "Opportunity Remaining": r.get("opportunity_remaining_pct"),
+                    "History Events": r.get("event_count"),
+                    "Analyst Verdict": r.get("analyst_verdict"),
+                })
+                fig = portfolio_chart(r.get("df"), f"{ticker} 1D", 0, r.get("potential_sell_price"))
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                fig4 = portfolio_chart(r.get("fourh_entry_df"), f"{ticker} 4H", 0, r.get("potential_sell_price"))
+                if fig4:
+                    st.plotly_chart(fig4, use_container_width=True)
+
+    df = pd.DataFrame([{k: v for k, v in r.items() if k not in ["df", "rsi_series", "spring_df", "fourh_entry_df", "ttm_momentum_series", "squeeze_on_series"]} for r in top])
+    keep_cols = [c for c in ["ticker", "entry_grade", "entry_score", "price", "potential_sell_price", "entry_drop_pct", "entry_drop_days", "entry_current_rsi", "entry_4h_label", "entry_macd_label", "entry_ema_label", "analyst_verdict"] if c in df.columns]
+    if keep_cols:
+        st.markdown("### Compact Entry Table")
+        st.dataframe(df[keep_cols], use_container_width=True, hide_index=True)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
