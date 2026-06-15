@@ -1,5 +1,5 @@
 """
-SwingIt V11.2.1.1 — Analyst Verdict Calibration
+SwingIt V11.2.2.2.1 — Analyst Verdict Calibration
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -2542,15 +2542,24 @@ def compute_ttm_spring(df: pd.DataFrame) -> dict:
             elif squeeze_bars > 0:
                 break
 
-    last_vals = valid_mom.tail(4).tolist()
+    # Use both a 4-bar slope and a shorter 1-2 bar turn check.
+    # The shorter check matters a lot on 4H charts: a setup can begin reversing
+    # before the 4-bar slope has fully flipped. This keeps SwingIt from calling
+    # an early 4H curl-up "Accelerating Down" simply because the broader
+    # short-term trend is still negative.
+    last_vals = valid_mom.tail(6).tolist()
     mom_now = float(last_vals[-1])
     mom_prev = float(last_vals[-2]) if len(last_vals) >= 2 else mom_now
-    mom_3ago = float(last_vals[0]) if len(last_vals) >= 4 else mom_prev
+    mom_2ago = float(last_vals[-3]) if len(last_vals) >= 3 else mom_prev
+    mom_3ago = float(last_vals[-4]) if len(last_vals) >= 4 else mom_2ago
     slope = mom_now - mom_3ago
     one_bar_change = mom_now - mom_prev
+    two_bar_change = mom_now - mom_2ago
+    recent_min = min(last_vals[-6:]) if last_vals else mom_now
 
     improving = slope > 0 and one_bar_change >= 0
-    worsening = slope < 0 and one_bar_change < 0
+    short_turn_up = (one_bar_change > 0 and two_bar_change > 0) or (one_bar_change > 0 and mom_now > recent_min)
+    worsening = slope < 0 and one_bar_change < 0 and not short_turn_up
     negative = mom_now < 0
     positive = mom_now >= 0
 
@@ -2574,10 +2583,10 @@ def compute_ttm_spring(df: pd.DataFrame) -> dict:
         label = "🟡 Loaded & Improving"
         spring_score = 90
         state_note = "Squeeze is still on while negative momentum is improving toward zero."
-    elif (not current_squeeze) and (not recently_fired) and negative and improving:
+    elif (not current_squeeze) and negative and (improving or short_turn_up):
         label = "🔵 Early Turn"
-        spring_score = 75
-        state_note = "No active squeeze, but negative momentum is improving."
+        spring_score = 75 if improving else 68
+        state_note = "Negative momentum is beginning to curl upward; this is an early tactical turn, not full confirmation yet."
     elif current_squeeze and worsening:
         label = "🟠 Loaded but Weakening"
         spring_score = 25
