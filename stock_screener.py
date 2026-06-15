@@ -1,5 +1,5 @@
 """
-SwingIt V10.6.1 — Universe Accuracy + Profile Defaults + Morning Report
+SwingIt V11 — Universe Accuracy + Profile Defaults + Morning Report
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V10.6.1",
+    page_title="SwingIt V11",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -376,7 +376,7 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V10.6.1</div>
+            <div class="terminal-title">🔥 SwingIt V11</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
@@ -2281,6 +2281,144 @@ def overreaction_score_from_parts(shock_score, narrative_score, history_score, o
     )
     return int(round(min(score, red_flag_cap or 100)))
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# V11 News Intelligence — analyst-style event classification
+# ──────────────────────────────────────────────────────────────────────────────
+NEWS_EARNINGS_WORDS = [
+    "earnings", "quarter", "results", "eps", "revenue", "sales", "profit", "margin", "guidance", "outlook",
+    "forecast", "estimates", "expectations", "miss", "beat", "beats", "tops", "raises", "cuts", "lowered"
+]
+NEWS_GUIDANCE_BAD_WORDS = [
+    "cuts guidance", "cut guidance", "lowers guidance", "lowered guidance", "weak outlook", "warns", "warning",
+    "below expectations", "disappointing guidance", "reduced outlook", "slashed forecast"
+]
+NEWS_GUIDANCE_GOOD_WORDS = [
+    "raises guidance", "raised guidance", "lifts guidance", "boosts outlook", "above expectations", "reaffirms",
+    "maintains guidance", "strong outlook", "upbeat outlook"
+]
+NEWS_ANALYST_WORDS = ["analyst", "upgrade", "downgrade", "price target", "initiates", "outperform", "underperform", "buy rating", "sell rating"]
+NEWS_LEGAL_REG_WORDS = ["lawsuit", "probe", "investigation", "regulatory", "sec", "doj", "ftc", "antitrust", "recall", "fraud", "accounting"]
+NEWS_DEAL_WORDS = ["contract", "deal", "partnership", "acquisition", "merger", "buyout", "tender", "strategic review", "spin-off", "spinoff"]
+NEWS_MACRO_SECTOR_WORDS = ["sector", "industry", "market selloff", "rate", "tariff", "macro", "inflation", "valuation", "profit taking", "rotation"]
+NEWS_SPENDING_MARGIN_WORDS = ["margin", "margins", "spending", "capex", "cost", "costs", "investment", "investments", "expenses"]
+NEWS_DROP_WORDS = ["falls", "fall", "drops", "drop", "slumps", "slides", "tumbles", "plunges", "down"]
+
+
+def _phrase_hits(text: str, phrases: list[str]) -> list[str]:
+    text = (text or "").lower()
+    return [phrase for phrase in phrases if phrase in text]
+
+
+def _classify_event_type(text: str) -> tuple[str, str, list[str]]:
+    """Return event type label, market excuse, evidence phrases from recent headlines."""
+    text_l = (text or "").lower()
+    evidence = []
+    def add_hits(words):
+        for h in _phrase_hits(text_l, words)[:5]:
+            if h not in evidence:
+                evidence.append(h)
+
+    red_hits = _phrase_hits(text_l, OVERREACTION_RED_FLAG_WORDS + NEWS_GUIDANCE_BAD_WORDS + NEWS_LEGAL_REG_WORDS)
+    if red_hits:
+        add_hits(OVERREACTION_RED_FLAG_WORDS + NEWS_GUIDANCE_BAD_WORDS + NEWS_LEGAL_REG_WORDS)
+        if any(w in text_l for w in ["guidance", "outlook", "forecast", "warn"]):
+            return "🔴 Negative business event", "guidance/outlook deterioration", evidence
+        if any(w in text_l for w in ["investigation", "probe", "sec", "fraud", "accounting"]):
+            return "🔴 Negative business event", "legal/regulatory/accounting concern", evidence
+        return "🔴 Negative business event", "fundamental red flag", evidence
+
+    if _phrase_hits(text_l, OVERREACTION_MISMATCH_WORDS):
+        add_hits(OVERREACTION_MISMATCH_WORDS)
+        if _phrase_hits(text_l, NEWS_SPENDING_MARGIN_WORDS):
+            add_hits(NEWS_SPENDING_MARGIN_WORDS)
+            return "🟡 Mixed event", "margin/spending concern despite positives", evidence
+        return "⚪ Non-fundamental selling", "selloff despite positive/mixed news", evidence
+
+    if _phrase_hits(text_l, NEWS_GUIDANCE_GOOD_WORDS + OVERREACTION_POSITIVE_WORDS):
+        add_hits(NEWS_GUIDANCE_GOOD_WORDS + OVERREACTION_POSITIVE_WORDS)
+        return "🟢 Positive business event", "positive operating/catalyst news", evidence
+
+    if _phrase_hits(text_l, NEWS_EARNINGS_WORDS):
+        add_hits(NEWS_EARNINGS_WORDS)
+        if _phrase_hits(text_l, NEWS_SPENDING_MARGIN_WORDS):
+            add_hits(NEWS_SPENDING_MARGIN_WORDS)
+            return "🟡 Mixed event", "earnings with margin/spending concern", evidence
+        return "🟡 Mixed event", "earnings/results reaction", evidence
+
+    if _phrase_hits(text_l, NEWS_ANALYST_WORDS):
+        add_hits(NEWS_ANALYST_WORDS)
+        if "downgrade" in text_l or "underperform" in text_l or "sell rating" in text_l:
+            return "⚪ Non-fundamental selling", "analyst downgrade", evidence
+        return "🟢 Positive business event", "analyst support/upgrade", evidence
+
+    if _phrase_hits(text_l, NEWS_DEAL_WORDS):
+        add_hits(NEWS_DEAL_WORDS)
+        return "🟢 Positive business event", "deal/partnership/corporate action", evidence
+
+    if _phrase_hits(text_l, NEWS_MACRO_SECTOR_WORDS):
+        add_hits(NEWS_MACRO_SECTOR_WORDS)
+        return "⚪ Non-fundamental selling", "sector/macro/valuation pressure", evidence
+
+    add_hits(NEWS_POSITIVE_WORDS + NEWS_NEGATIVE_WORDS)
+    return "⚪ Unclear event", "headline context unclear", evidence
+
+
+def news_intelligence_from_news(news: dict, panic: dict, narrative: dict) -> dict:
+    """Analyst-style interpretation of news + price reaction.
+
+    This is a rules-based analyst read, not a guarantee. It tries to separate false panic,
+    overdone bad news, appropriate selloff, and broken-story red flags.
+    """
+    text = str(news.get("news_text") or news.get("news_headline") or "")
+    event_type, market_excuse, evidence = _classify_event_type(text)
+    shock_score = _to_float(panic.get("panic_shock_score"), 0) or 0
+    narrative_score = _to_float(narrative.get("narrative_score"), 0) or 0
+    red_cap = narrative.get("red_flag_score_cap", 100) or 100
+    red_label = narrative.get("red_flag_label", "⚪ No red flag scan")
+    headline = str(news.get("news_headline") or "No headline available.")
+    age = news.get("news_age_days")
+
+    event_l = event_type.lower()
+    if red_cap <= 35 or "negative business" in event_l:
+        verdict = "🔴 Broken / justified risk"
+        reaction = "The selloff may be fundamentally justified. Treat any bounce as higher risk until the story improves."
+        intel_score = int(round(min(narrative_score, red_cap)))
+    elif shock_score >= 55 and ("positive business" in event_l or "non-fundamental" in event_l) and narrative_score >= 55:
+        verdict = "🟢 False panic candidate"
+        reaction = "The price reaction looks more severe than the headline story. This is the type of mismatch SwingIt is built to flag."
+        intel_score = int(round(clamp(0.45 * shock_score + 0.45 * narrative_score + 10)))
+    elif shock_score >= 45 and "mixed event" in event_l and narrative_score >= 35:
+        verdict = "🟡 Overdone bad news"
+        reaction = "There are legitimate concerns, but the size or speed of the selloff may be excessive. Requires chart confirmation."
+        intel_score = int(round(clamp(0.40 * shock_score + 0.45 * narrative_score + 5)))
+    elif shock_score >= 45 and narrative_score < 35:
+        verdict = "🟠 Selloff may be appropriate"
+        reaction = "The stock sold off hard, but the headline read does not yet show enough mismatch to call it false panic."
+        intel_score = int(round(clamp(0.30 * shock_score + 0.40 * narrative_score)))
+    else:
+        verdict = "⚪ No clear news edge"
+        reaction = "There is not enough recent news/price mismatch to make the news layer a major part of the trade case."
+        intel_score = int(round(clamp(0.30 * shock_score + 0.50 * narrative_score)))
+
+    evidence_text = ", ".join(evidence[:6]) if evidence else "No strong keyword evidence found."
+    age_text = f"{age} days old" if age is not None else "age unknown"
+    analyst_note = (
+        f"Event read: {clean_label(event_type)}. The market's excuse appears to be {market_excuse}. "
+        f"Latest headline ({age_text}): {headline[:180]}. Verdict: {clean_label(verdict)} — {reaction}"
+    )
+    return {
+        "news_intel_score": intel_score,
+        "event_type": event_type,
+        "market_excuse": market_excuse,
+        "analyst_verdict": verdict,
+        "reaction_analysis": reaction,
+        "news_evidence": evidence_text,
+        "analyst_note": analyst_note,
+        "news_freshness": age_text,
+        "red_flag_label": red_label,
+    }
+
 def confidence_from_history(event_count, recovery_rate):
     """Separate confidence from opportunity: how much evidence supports the pattern."""
     if not event_count or event_count <= 0:
@@ -2656,6 +2794,7 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
 
         panic = panic_shock_from_df(close, volume, lookback_days=15)
         narrative = narrative_mismatch_from_news(news, panic.get("panic_shock_score", 0))
+        news_intel = news_intelligence_from_news(news, panic, narrative)
         overreaction_score = overreaction_score_from_parts(
             panic.get("panic_shock_score", 0),
             narrative.get("narrative_score", 0),
@@ -2694,6 +2833,14 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
             "narrative_label": narrative.get("narrative_label"),
             "narrative_reason": narrative.get("narrative_reason"),
             "red_flag_label": narrative.get("red_flag_label"),
+            "news_intel_score": news_intel.get("news_intel_score"),
+            "event_type": news_intel.get("event_type"),
+            "market_excuse": news_intel.get("market_excuse"),
+            "analyst_verdict": news_intel.get("analyst_verdict"),
+            "reaction_analysis": news_intel.get("reaction_analysis"),
+            "news_evidence": news_intel.get("news_evidence"),
+            "analyst_note": news_intel.get("analyst_note"),
+            "news_freshness": news_intel.get("news_freshness"),
             "overreaction_score": overreaction_score,
             "overreaction_label": overreaction_label,
             "avg_vol_20d": int(avg_vol_20d) if avg_vol_20d else None,
@@ -3253,6 +3400,14 @@ def hot_card(rank, row):
     catalyst_reason = _safe_html(row.get("Catalyst Reason", "No catalyst details available."))
     headline = _safe_html(row.get("Headline", "No headline available."))
     news = _safe_html(row.get("News", ""))
+    event_type = row.get("Event Type", "⚪ Unclear event")
+    market_excuse = row.get("Market Excuse", "headline context unclear")
+    analyst_verdict = row.get("Analyst Verdict", "⚪ No clear news edge")
+    news_intel_score = row.get("News Intel Score", "—")
+    reaction_analysis = _safe_html(row.get("Reaction Analysis", "No reaction analysis available."))
+    news_evidence = _safe_html(row.get("News Evidence", "No keyword evidence available."))
+    analyst_note = _safe_html(row.get("Analyst Note", "No analyst note available."))
+    news_freshness = _safe_html(row.get("News Freshness", "age unknown"))
 
     swing_tip = f"""
         <strong>Swing Score</strong><br>
@@ -3355,10 +3510,20 @@ def hot_card(rank, row):
         {volume_trend_reason}
     """
     news_tip = f"""
-        <strong>News / catalyst</strong><br>
-        {catalyst_reason}<br><br>
+        <strong>V11 News Intelligence</strong><br>
+        Event type: {_safe_html(clean_label(event_type))}<br>
+        Market's excuse: {_safe_html(market_excuse)}<br>
+        Analyst verdict: {_safe_html(clean_label(analyst_verdict))}<br>
+        News intelligence score: {_safe_html(news_intel_score)}/100<br>
+        Freshness: {news_freshness}<br><br>
+        <strong>Reaction analysis</strong><br>
+        {reaction_analysis}<br><br>
+        <strong>Evidence clues</strong><br>
+        {news_evidence}<br><br>
         <strong>Top headline</strong><br>
         {headline}<br><br>
+        <strong>Catalyst score detail</strong><br>
+        {catalyst_reason}<br><br>
         News label: {news}
     """
     overreaction_tip = f"""
@@ -3407,6 +3572,7 @@ def hot_card(rank, row):
             {hover_item('Attention', clean_label(attention), attention_tip, dot=True)}
             {hover_item('Volume trend', clean_label(volume_trend), volume_trend_tip, dot=True)}
             {hover_item('Spring', f'{spring_tf} · {clean_label(spring)}', spring_score_tip, dot=True)}
+            {hover_item('News Read', f'{clean_label(event_type)} · {clean_label(analyst_verdict)}', news_tip, dot=True)}
             {hover_item('News', clean_label(catalyst), news_tip, dot=True)}
             {hover_item('Confidence', clean_label(confidence), confidence_tip, dot=True)}
             {hover_item('Institution', clean_label(institution), institution_tip, dot=True)}
@@ -3690,6 +3856,14 @@ for r in results:
         "Narrative": r.get("narrative_label"),
         "Narrative Reason": r.get("narrative_reason"),
         "Red Flags": r.get("red_flag_label"),
+        "News Intel Score": r.get("news_intel_score"),
+        "Event Type": r.get("event_type"),
+        "Market Excuse": r.get("market_excuse"),
+        "Analyst Verdict": r.get("analyst_verdict"),
+        "Reaction Analysis": r.get("reaction_analysis"),
+        "News Evidence": r.get("news_evidence"),
+        "Analyst Note": r.get("analyst_note"),
+        "News Freshness": r.get("news_freshness"),
         "Avg Max Bounce": r.get("avg_max_bounce_pct"),
         "Avg Days to Max": r.get("avg_days_to_max_bounce"),
         "Successful Swings": r.get("profitable_event_count"),
@@ -3959,7 +4133,7 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V10.6.1 uses multiple view-by lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (RSI opportunity, rebound stage, stabilization, catalyst/news, daily TTM spring, 4H trigger, attention/RVOL, and volume trend).
+    Current V11 uses multiple view-by lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (RSI opportunity, rebound stage, stabilization, catalyst/news, daily TTM spring, 4H trigger, attention/RVOL, and volume trend).
 
     **View By** defines what #1 means. 🎯 Target Hunter is the default for your 8% swing goal; ⚡ Ready Now is for what to open in ThinkorSwim first; 🧠 Highest Confidence is the safest historical pattern; 🚀 Maximum Upside is the biggest reward lens; 😱 Overreaction hunts likely false-panic selloffs; 🧊 Stabilizing Panics finds names where the panic may have stopped but the daily chart has not fully confirmed yet. **Opportunity Remaining** estimates how much of the usual RSI-panic rebound may still be left from the most recent panic-cycle low.
 
