@@ -1,5 +1,5 @@
 """
-SwingIt V11.2.2.2.1 — Analyst Verdict Calibration
+SwingIt V11.2.3.2.1 — Analyst Verdict Calibration
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -2615,6 +2615,44 @@ def compute_ttm_spring(df: pd.DataFrame) -> dict:
         label = "⚪ Neutral"
         spring_score = 50
         state_note = "No strong spring signal right now."
+
+
+    # V11.2.3 tactical curl override:
+    # TTM momentum is intentionally slow, especially on 4H after a violent selloff.
+    # If price/RSI are already curling up and recent lows are holding, do not keep
+    # calling the tactical trigger "Accelerating Down". This better matches the
+    # chart-read we care about for entries: sellers may still have the larger
+    # momentum, but buyers are starting to step in on the lower timeframe.
+    try:
+        rsi_check = ta.momentum.RSIIndicator(close, window=14).rsi().dropna()
+        recent_close = close.dropna().tail(6)
+        recent_low = low.dropna().tail(8)
+        if len(rsi_check) >= 5 and len(recent_close) >= 4 and len(recent_low) >= 5:
+            rsi_now = float(rsi_check.iloc[-1])
+            rsi_prev = float(rsi_check.iloc[-2])
+            rsi_min_6 = float(rsi_check.tail(6).min())
+            close_now = float(recent_close.iloc[-1])
+            close_prev = float(recent_close.iloc[-2])
+            close_3ago = float(recent_close.iloc[-3])
+            low_last_3 = float(recent_low.tail(3).min())
+            low_last_8 = float(recent_low.min())
+
+            rsi_curling = (rsi_now > rsi_prev) or (rsi_now >= rsi_min_6 + 3)
+            price_curling = (close_now > close_prev) or (close_now > close_3ago)
+            lows_holding = low_last_3 >= (low_last_8 * 0.995)
+            panic_area = rsi_now <= 45
+
+            tactical_curl_up = rsi_curling and price_curling and lows_holding and panic_area
+            if tactical_curl_up and label in ["⚫ Accelerating Down", "🔴 Fired Down", "🟠 Loaded but Weakening"]:
+                label = "🔵 Early Turn"
+                spring_score = max(int(spring_score), 68)
+                state_note = (
+                    "TTM momentum remains negative, but price/RSI are curling up and recent lows are holding. "
+                    "This is an early tactical turn, not full confirmation yet."
+                )
+                trend = "🟢 Tactical curl-up"
+    except Exception:
+        pass
 
     # Small duration bonus/penalty nuance for active/recent squeeze states.
     if current_squeeze or recently_fired:
