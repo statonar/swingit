@@ -1,5 +1,5 @@
 """
-SwingIt V12 — My Portfolio Command Center
+SwingIt V12.5 — My Portfolio Command Center + Thesis Monitor
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -4140,7 +4140,7 @@ def mini_chart(data):
 # V12 Portfolio Command Center helpers
 # ──────────────────────────────────────────────────────────────────────────────
 PORTFOLIO_CSV_FILE = "portfolio.csv"
-PORTFOLIO_COLUMNS = ["Ticker", "Entry Price", "Entry Date", "Shares", "Profit Goal %"]
+PORTFOLIO_COLUMNS = ["Ticker", "Entry Price", "Entry Date", "Shares", "Profit Goal %", "Entry Thesis"]
 
 
 def portfolio_to_csv_text(rows: list[dict]) -> str:
@@ -4169,6 +4169,7 @@ def load_portfolio() -> list[dict]:
                     "Entry Date": str(r.get("Entry Date", ""))[:10],
                     "Shares": float(r.get("Shares", 0) or 0),
                     "Profit Goal %": float(r.get("Profit Goal %", 8) or 8),
+                    "Entry Thesis": str(r.get("Entry Thesis", r.get("Thesis", "")) or ""),
                 })
     except Exception:
         rows = []
@@ -4202,6 +4203,7 @@ def save_portfolio(rows: list[dict]) -> None:
             "Entry Date": str(r.get("Entry Date", ""))[:10],
             "Shares": shares,
             "Profit Goal %": goal,
+            "Entry Thesis": str(r.get("Entry Thesis", r.get("Thesis", "")) or ""),
         })
     st.session_state["portfolio_rows_single_user"] = clean
     try:
@@ -4234,6 +4236,7 @@ def load_portfolio_from_upload(uploaded_file) -> list[dict]:
                 "Entry Date": str(r.get("Entry Date", r.get("Date", "")))[:10],
                 "Shares": float(r.get("Shares", 0) or 0),
                 "Profit Goal %": float(r.get("Profit Goal %", r.get("Goal", 8)) or 8),
+                "Entry Thesis": str(r.get("Entry Thesis", r.get("Thesis", "")) or ""),
             })
         return rows
     except Exception:
@@ -4301,6 +4304,116 @@ def portfolio_chart(df: pd.DataFrame, title: str, entry_price=None, target_price
     return fig
 
 
+
+def thesis_monitor(candidate: dict, position: dict, fourh: dict, oneh: dict) -> dict:
+    """Portfolio thesis monitor.
+
+    This is separate from Trade Health. Trade Health asks: is the chart working now?
+    Thesis Health asks: is the original reason for owning the stock still valid?
+    """
+    entry_thesis = str(position.get("Entry Thesis", "") or "").strip()
+    analyst_verdict = clean_label(candidate.get("analyst_verdict", ""))
+    analyst_note = str(candidate.get("analyst_note", "") or "")
+    event_type = clean_label(candidate.get("event_type", "")) or "Recent market/news event"
+    market_excuse = clean_label(candidate.get("market_excuse", "")) or "No specific market excuse detected."
+    reaction = clean_label(candidate.get("reaction_analysis", ""))
+    red_flag = clean_label(candidate.get("red_flag_label", ""))
+    market_text = f"{analyst_verdict} {analyst_note} {event_type} {market_excuse} {reaction} {red_flag}".lower()
+
+    # Separate legal headline risk from actual business/fundamental damage.
+    legal_terms = ["lawsuit", "class action", "shareholder", "investigation", "legal"]
+    legal_risk = any(t in market_text for t in legal_terms)
+    hard_damage_terms = [
+        "sec enforcement", "accounting irregular", "restatement", "fraud proven", "bankruptcy",
+        "liquidity crisis", "going concern", "guidance cut", "cut guidance", "customer loss",
+        "fundamental damage", "broken story", "demand collapse"
+    ]
+    hard_damage = any(t in market_text for t in hard_damage_terms)
+    mixed_terms = ["miss", "slowing", "margin", "weaker", "lower", "downgrade", "concern"]
+    mixed_risk = any(t in market_text for t in mixed_terms)
+    positive_terms = ["beat", "raised", "strong demand", "record", "growth", "contract", "buyback", "approval"]
+    positive_support = any(t in market_text for t in positive_terms)
+
+    fourh_score = _to_float(fourh.get("spring", {}).get("spring_score"), 0)
+    oneh_score = _to_float(oneh.get("spring", {}).get("spring_score"), 0)
+    daily_score = _to_float(candidate.get("spring_score"), 0)
+    price_vote = "🟢 Buyers are currently supporting the trade" if fourh_score >= 60 and oneh_score >= 50 else ("🟡 Market response is mixed" if fourh_score >= 40 else "🔴 The market is not confirming the trade yet")
+    volume_score = _to_float(candidate.get("volume_trend_score"), 50)
+    volume_vote = "🟢 Volume trend is supportive" if volume_score >= 65 else ("🟡 Volume trend is neutral/mixed" if volume_score >= 40 else "🔴 Volume trend is not supportive")
+    market_vote_score = round(clamp(fourh_score*0.38 + oneh_score*0.22 + daily_score*0.22 + volume_score*0.18))
+    if market_vote_score >= 70:
+        market_vote_label = "🟢 Market rejecting worst-case interpretation"
+    elif market_vote_score >= 45:
+        market_vote_label = "🟡 Market still deciding"
+    else:
+        market_vote_label = "🔴 Market still validating caution"
+
+    if hard_damage:
+        thesis_health = "🔴 Thesis Broken"
+        thesis_class = "decision-red"
+        severity = "High"
+        thesis_summary = "New information appears to challenge the original reason for owning the stock. Treat technical rebounds with caution until the business/story damage is resolved."
+    elif legal_risk or mixed_risk:
+        if market_vote_score >= 65:
+            thesis_health = "🟡 Thesis Challenged"
+            thesis_class = "decision-yellow"
+            severity = "Moderate"
+            thesis_summary = "News or legal headlines increase risk, but the market is currently absorbing the concern and the trade is still technically constructive."
+        else:
+            thesis_health = "🟠 Thesis Weakening"
+            thesis_class = "decision-yellow"
+            severity = "Moderate-High"
+            thesis_summary = "The original thesis is being tested and price action has not fully rejected the negative interpretation yet. Keep a tighter leash."
+    elif positive_support or "false panic" in market_text or "overreaction" in market_text:
+        thesis_health = "🟢 Thesis Intact"
+        thesis_class = "decision-green"
+        severity = "Low-Moderate"
+        thesis_summary = "The available news does not appear to invalidate the original trade thesis. Current evidence is consistent with a recoverable overreaction."
+    else:
+        thesis_health = "🟡 Thesis Unproven"
+        thesis_class = "decision-blue"
+        severity = "Unknown/Moderate"
+        thesis_summary = "There is not enough news context to strongly confirm or reject the thesis, so the chart and risk plan should carry more weight."
+
+    if legal_risk and not hard_damage:
+        event = "Legal/shareholder investigation headline"
+        fear = "Investors may fear management knew about slowing growth or business issues before the market did."
+        reality = "These announcements often follow large post-earnings stock drops and do not by themselves prove wrongdoing. They matter more if followed by SEC action, accounting issues, restatements, or fresh business deterioration."
+        changes = "SEC enforcement action; accounting restatement; confirmed misleading disclosures; another major guidance cut; evidence that customer demand is weakening."
+    elif hard_damage:
+        event = event_type or "Potential fundamental damage event"
+        fear = "The market may be reacting to a real deterioration in the business or disclosure quality."
+        reality = "This type of event can make historical rebound patterns less reliable because the original business story may have changed."
+        changes = "Clear company clarification; improved guidance; evidence customers/demand remain healthy; price reclaiming key levels on strong volume."
+    elif mixed_risk:
+        event = event_type or "Mixed earnings/outlook event"
+        fear = market_excuse or "Investors may be worried that growth or margins are weakening."
+        reality = "The concern may be real but not necessarily fatal. The key is whether buyers continue to defend the stock after the market has had time to digest the news."
+        changes = "Further guidance weakness; analyst target cuts tied to fundamentals; failed 4H trend; loss of recent support on heavy volume."
+    else:
+        event = event_type or "No major damaging event detected"
+        fear = market_excuse or "No obvious thesis-breaking fear detected."
+        reality = analyst_note or "The news read does not currently show a clear business-breakdown signal."
+        changes = "New negative company-specific news; loss of 4H momentum; daily rollover; opportunity remaining becoming too low."
+
+    return {
+        "entry_thesis": entry_thesis or "No entry thesis provided yet.",
+        "thesis_health": thesis_health,
+        "thesis_class": thesis_class,
+        "thesis_severity": severity,
+        "thesis_summary": thesis_summary,
+        "event": event,
+        "market_fear": fear,
+        "reality_check": reality,
+        "what_changes_my_mind": changes,
+        "market_vote_label": market_vote_label,
+        "market_vote_score": market_vote_score,
+        "price_vote": price_vote,
+        "volume_vote": volume_vote,
+        "legal_risk": legal_risk,
+        "hard_damage": hard_damage,
+    }
+
 def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: dict) -> dict:
     """Portfolio-specific exit logic.
 
@@ -4323,6 +4436,7 @@ def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: 
     setup_score = _to_float(candidate.get("setup_quality"), 0)
     market_read = clean_label(candidate.get("market_read_label", candidate.get("analyst_verdict", "")))
     red_flag = clean_label(candidate.get("red_flag_label", ""))
+    thesis_info = thesis_monitor(candidate, position, fourh, oneh)
 
     # Trade Health = what the position is doing now.
     # This is intentionally more important than the original entry/news thesis once we own it.
@@ -4335,13 +4449,10 @@ def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: 
     ))
 
     # Thesis risk = true story damage, not merely "the news was scary."
-    hard_red_flag_terms = [
-        "fraud", "sec", "investigation", "bankruptcy", "liquidity", "accounting",
-        "guidance cut", "cut guidance", "fundamental damage", "broken"
-    ]
-    thesis_text = f"{market_read} {red_flag}".lower()
-    hard_red_flag = any(term in thesis_text for term in hard_red_flag_terms)
-    broken = ("fundamental damage" in thesis_text or "broken" in thesis_text or hard_red_flag)
+    # A portfolio exit should require real thesis damage, not merely a scary old headline.
+    thesis_text = f"{market_read} {red_flag} {thesis_info.get('thesis_health','')}".lower()
+    hard_red_flag = bool(thesis_info.get("hard_damage"))
+    broken = ("thesis broken" in thesis_text or hard_red_flag)
 
     # The 1H should only become important near the harvest zone or when 4H starts weakening.
     exit_assistant_active = progress >= 80 or opp_remaining <= 25 or fourh_score < 45
@@ -4430,6 +4541,7 @@ def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: 
         "oneh_note": oneh_note,
         "exit_assistant_active": exit_assistant_active,
         "trade_story": trade_story,
+        "thesis_info": thesis_info,
     }
 
 
@@ -4523,7 +4635,7 @@ def compute_portfolio_fallback_candidate(ticker: str, entry_price: float, goal_p
         return None
 
 @st.cache_data(ttl=900, show_spinner=False)
-def compute_portfolio_deep(ticker: str, entry_price: float, entry_date: str, goal_pct: float):
+def compute_portfolio_deep(ticker: str, entry_price: float, entry_date: str, goal_pct: float, entry_thesis: str = ""):
     candidate = compute_candidate(ticker, goal_pct or 8, 30, True, "1D")
     fallback_used = False
     if not candidate:
@@ -4533,13 +4645,13 @@ def compute_portfolio_deep(ticker: str, entry_price: float, entry_date: str, goa
         return None
     fourh = _download_intraday_spring(ticker, "4H")
     oneh = _download_intraday_spring(ticker, "1H")
-    analysis = portfolio_exit_analysis(candidate, {"Entry Price": entry_price, "Entry Date": entry_date, "Profit Goal %": goal_pct}, fourh, oneh)
+    analysis = portfolio_exit_analysis(candidate, {"Entry Price": entry_price, "Entry Date": entry_date, "Profit Goal %": goal_pct, "Entry Thesis": entry_thesis}, fourh, oneh)
     return {"candidate": candidate, "fourh": fourh, "oneh": oneh, "analysis": analysis, "fallback_used": fallback_used}
 
 
 def render_portfolio_command_center():
     st.markdown("## 👑 My Portfolio Command Center")
-    st.caption("Manage active swing positions. Scanner finds entries; Portfolio helps you decide whether to hold, trim, sell, or reassess.")
+    st.caption("Manage active swing positions. Scanner finds entries; Portfolio tracks Trade Health, Thesis Health, Market Vote, and exit timing.")
 
     rows = load_portfolio()
     with st.container(border=True):
@@ -4558,6 +4670,7 @@ def render_portfolio_command_center():
                 "Entry Date": st.column_config.TextColumn(help="YYYY-MM-DD"),
                 "Shares": st.column_config.NumberColumn(format="%.4f", min_value=0.0),
                 "Profit Goal %": st.column_config.NumberColumn(format="%.1f%%", min_value=1.0, max_value=100.0),
+                "Entry Thesis": st.column_config.TextColumn(help="Why you entered this trade. Example: Earnings overreaction; market likely too pessimistic."),
             },
             key="portfolio_editor",
         )
@@ -4587,7 +4700,7 @@ def render_portfolio_command_center():
         if not ticker:
             continue
         with st.spinner(f"Deep-diving {ticker}…"):
-            data = compute_portfolio_deep(ticker, float(pos.get("Entry Price", 0) or 0), str(pos.get("Entry Date", "")), float(pos.get("Profit Goal %", 8) or 8))
+            data = compute_portfolio_deep(ticker, float(pos.get("Entry Price", 0) or 0), str(pos.get("Entry Date", "")), float(pos.get("Profit Goal %", 8) or 8), str(pos.get("Entry Thesis", "") or ""))
         if not data:
             st.warning(f"Could not analyze {ticker}.")
             continue
@@ -4605,6 +4718,21 @@ def render_portfolio_command_center():
             if fallback_used:
                 st.caption("Using lightweight portfolio analysis for this ticker because the full scanner read was unavailable.")
             st.markdown(f"<div class='read-box'><div class='read-title'>🧠 Trade Story</div><div class='read-text'>{html.escape(analysis['trade_story'])}</div></div>", unsafe_allow_html=True)
+            thesis = analysis.get("thesis_info", {})
+            st.markdown(
+                f"<div class='read-box'>"
+                f"<div class='read-title'>🧾 Entry Thesis</div>"
+                f"<div class='read-text'>{html.escape(str(thesis.get('entry_thesis','No entry thesis provided yet.')))}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='read-box'>"
+                f"<div class='read-title'>🧠 Thesis Health: <span class='decision-pill {html.escape(str(thesis.get('thesis_class','decision-blue')))}'>{html.escape(str(thesis.get('thesis_health','—')))} · {html.escape(str(thesis.get('thesis_severity','')))}</span></div>"
+                f"<div class='read-text'>{html.escape(str(thesis.get('thesis_summary','')))}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
             st.markdown(f"<div class='read-box'><div class='read-title'>⏳ Exit Window</div><div class='read-text'><strong>{html.escape(analysis['window'])}</strong><br>{html.escape(analysis['reason'])}<br>{html.escape(analysis['oneh_note'])}</div></div>", unsafe_allow_html=True)
             m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Current", f"${c.get('price', 0):.2f}")
@@ -4623,7 +4751,24 @@ def render_portfolio_command_center():
                 st.markdown("<div class='read-box'><div class='read-title'>⏱️ 1H Exit Timing</div><div class='read-text'>" + html.escape(timeframe_read("1H", oneh.get("spring", {}), oneh.get("rsi"))) + "</div></div>", unsafe_allow_html=True)
 
             st.markdown("#### Market + News Read")
-            st.markdown(f"<div class='read-box'><div class='read-title'>🧠 Market Read: {html.escape(clean_label(c.get('analyst_verdict','—')))}</div><div class='read-text'>{html.escape(str(c.get('analyst_note','No analyst note available.')))}</div></div>", unsafe_allow_html=True)
+            thesis = analysis.get("thesis_info", {})
+            st.markdown(
+                f"<div class='read-box'>"
+                f"<div class='read-title'>📰 Event: {html.escape(str(thesis.get('event','—')))}</div>"
+                f"<div class='read-text'><strong>Market Fear:</strong> {html.escape(str(thesis.get('market_fear','—')))}<br>"
+                f"<strong>Reality Check:</strong> {html.escape(str(thesis.get('reality_check','—')))}<br>"
+                f"<strong>What Changes My Mind:</strong> {html.escape(str(thesis.get('what_changes_my_mind','—')))}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='read-box'>"
+                f"<div class='read-title'>📈 Market Vote: {html.escape(str(thesis.get('market_vote_label','—')))} ({_to_float(thesis.get('market_vote_score'),0):.0f}/100)</div>"
+                f"<div class='read-text'>{html.escape(str(thesis.get('price_vote','')))}<br>{html.escape(str(thesis.get('volume_vote','')))}<br>"
+                f"Original Market Read: {html.escape(clean_label(c.get('analyst_verdict','—')))} — {html.escape(str(c.get('analyst_note','No analyst note available.')))}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
             with st.expander(f"Charts for {ticker}: 1D, 4H, 1H", expanded=False):
                 ca, cb, cc = st.columns(3)
