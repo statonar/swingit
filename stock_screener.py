@@ -400,8 +400,8 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V12</div>
-            <div class="terminal-subtitle">Scanner + Portfolio Command Center.</div>
+            <div class="terminal-title">🔥 SwingIt V13</div>
+            <div class="terminal-subtitle">Entry Hunter + Scanner + Portfolio.</div>
             """,
             unsafe_allow_html=True,
         )
@@ -410,13 +410,13 @@ with st.container(border=True):
         st.markdown("<div class='toolbar-label'>Workspace</div>", unsafe_allow_html=True)
         workspace = st.selectbox(
             "Workspace",
-            ["🔥 Scanner", "👑 My Portfolio"],
+            ["⚡ Entry Hunter", "🔥 Scanner", "👑 My Portfolio"],
             index=0,
             label_visibility="collapsed",
             key="workspace_selector",
-            help="Scanner finds new opportunities. My Portfolio manages active swing positions and exits.",
+            help="Entry Hunter finds this week\'s actionable swing entries. Scanner researches the market. Portfolio manages active swing positions and exits.",
         )
-        st.markdown("<div class='toolbar-help'>Hunt or manage</div>", unsafe_allow_html=True)
+        st.markdown("<div class='toolbar-help'>Enter, research, or manage</div>", unsafe_allow_html=True)
 
     with top_universe_col:
         st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
@@ -512,7 +512,8 @@ with st.container(border=True):
 
     with top_run_col:
         st.markdown("<div class='toolbar-label'>&nbsp;</div>", unsafe_allow_html=True)
-        run = st.button("🚀 Run Swing Scan", use_container_width=True, disabled=(st.session_state.get("workspace_selector") == "👑 My Portfolio"))
+        run_label = "⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else "🚀 Run Swing Scan"
+        run = st.button(run_label, use_container_width=True, disabled=(st.session_state.get("workspace_selector") == "👑 My Portfolio"))
         st.markdown("<div class='run-note'>Use ToS for entries/exits.</div>", unsafe_allow_html=True)
 
 if universe == "Custom list":
@@ -4824,6 +4825,73 @@ def render_portfolio_command_center():
 # Portfolio workspace short-circuits the scanner UI.
 if st.session_state.get("workspace_selector") == "👑 My Portfolio":
     render_portfolio_command_center()
+    st.stop()
+
+
+# Entry Hunter workspace short-circuits the broad research scanner UI.
+if st.session_state.get("workspace_selector") == "⚡ Entry Hunter":
+    if "entry_hunter_results" not in st.session_state:
+        st.session_state.entry_hunter_results = None
+    if "entry_hunter_meta" not in st.session_state:
+        st.session_state.entry_hunter_meta = None
+
+    if not run and st.session_state.entry_hunter_results is None:
+        with st.container(border=True):
+            st.markdown("## ⚡ Entry Hunter")
+            st.markdown(
+                "Find the few stocks that match your actual weekly-entry recipe: $2B+ market cap, a fast 5–25% panic drop, RSI recovery from oversold, MACD/EMA turn, and a 4H TTM trigger."
+            )
+            st.caption("Choose a universe above, then click Run Swing Scan. This workspace is intentionally picky; zero results can be the correct answer.")
+        st.stop()
+
+    if run:
+        universe_text = custom_input
+        if universe == "📂 CSV upload":
+            uploaded_tickers = parse_uploaded_tickers(csv_uploaded)
+            universe_text = ",".join(uploaded_tickers)
+        all_tickers, source_map = get_universe_payload(universe, universe_text)
+        if not all_tickers:
+            st.warning("No tickers found. Check your custom list or choose another universe.")
+            st.stop()
+        st.info(f"⚡ Entry Hunter scanning {len(all_tickers):,} tickers from {universe}…")
+        progress = st.progress(0)
+        status = st.empty()
+        leaders_box = st.empty()
+        results = []
+        completed = 0
+        with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
+            future_map = {
+                executor.submit(compute_entry_hunter_candidate, ticker, profit_target, bounce_window, include_news): ticker
+                for ticker in all_tickers
+            }
+            for future in as_completed(future_map):
+                ticker = future_map[future]
+                completed += 1
+                try:
+                    candidate = future.result()
+                except Exception:
+                    candidate = None
+                if candidate:
+                    results.append(candidate)
+                progress.progress(min(completed / max(len(all_tickers), 1), 1.0))
+                status.caption(f"Entry Hunter · scanned {completed:,} / {len(all_tickers):,} · latest: {ticker} · elite entries: {len(results):,}")
+                if results and (completed % 50 == 0 or completed == len(all_tickers)):
+                    preview = sorted(results, key=lambda r: float(r.get('entry_score', 0)), reverse=True)[:5]
+                    leaders_box.info("Live Entry Hunter leaders: " + " · ".join([f"{r.get('ticker')} {r.get('entry_grade')} {r.get('entry_score')}" for r in preview]))
+        progress.empty(); status.empty(); leaders_box.empty()
+        st.session_state.entry_hunter_results = sorted(results, key=lambda r: float(r.get("entry_score", 0)), reverse=True)
+        st.session_state.entry_hunter_meta = {
+            "universe": universe,
+            "tickers_scanned": len(all_tickers),
+            "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
+        }
+
+    meta_e = st.session_state.entry_hunter_meta or {"universe": universe, "tickers_scanned": 0, "run_date": "current session"}
+    st.markdown(
+        f"<div class='small-muted'>Entry Hunter scan: {html.escape(str(meta_e.get('universe')))} · {int(meta_e.get('tickers_scanned', 0)):,} tickers · {html.escape(str(meta_e.get('run_date','')))}</div>",
+        unsafe_allow_html=True,
+    )
+    render_entry_hunter_workspace(st.session_state.entry_hunter_results or [], meta_e.get("universe", universe), meta_e)
     st.stop()
 
 # Morning Report landing action
