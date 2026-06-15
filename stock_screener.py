@@ -400,8 +400,8 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V13</div>
-            <div class="terminal-subtitle">Entry Hunter + Scanner + Portfolio.</div>
+            <div class="terminal-title">🔥 SwingIt V13.6</div>
+            <div class="terminal-subtitle">Recovery Pipeline + Scanner + Portfolio.</div>
             """,
             unsafe_allow_html=True,
         )
@@ -4855,12 +4855,13 @@ def get_market_cap_estimate(ticker: str):
     return None
 
 
-def recent_fast_drop(close: pd.Series, volume: pd.Series | None = None, lookback: int = 12, max_days: int = 5):
+def recent_fast_drop(close: pd.Series, volume: pd.Series | None = None, lookback: int = 18, max_days: int = 10):
     """Find a TRUE panic signature, not a slow drift.
 
-    Entry Hunter wants sharp shock events: roughly -10%+ in 1-5 trading days,
-    with at least one ugly daily candle or a two-day collapse. This avoids names
-    like ICE's recent slow walk lower while still catching FOXA-style impact days.
+    V13.6 Recovery Pipeline wants shock events with real sharpness.
+    A+ panics happen in 1-5 trading days; A panics can take 6-10 days if
+    the move still includes ugly candles / volume. Slow multi-week fades
+    should score poorly and stay out of Entry Hunter.
     """
     empty = {
         "drop_pct": 0, "drop_days": None, "peak_date": None, "trough_date": None,
@@ -4928,12 +4929,12 @@ def recent_fast_drop(close: pd.Series, volume: pd.Series | None = None, lookback
         elif drop_pct >= 10: magnitude_score = 65
         elif drop_pct >= 8: magnitude_score = 40
 
-        velocity_score = 100 if days <= 2 else (85 if days <= 3 else (70 if days <= 5 else 20))
+        velocity_score = 100 if days <= 2 else (90 if days <= 5 else (75 if days <= 7 else (58 if days <= 10 else 15)))
         candle_score = 100 if largest_1d_drop <= -8 else (80 if largest_1d_drop <= -5 else (75 if largest_2d_drop <= -8 else 10))
         volume_score = _volume_score_from_ratio(vr) if vr else 35
         sig = clamp(0.40*magnitude_score + 0.25*velocity_score + 0.22*candle_score + 0.13*volume_score)
 
-        label = "🔥 True panic" if sig >= 80 else ("🟡 Sharp selloff" if sig >= 60 else "⚪ Not sharp enough")
+        label = "🔥 A+ panic" if sig >= 85 else ("🟢 A panic" if sig >= 70 else ("🟡 Developing panic" if sig >= 55 else "⚪ Not sharp enough"))
         best.update({
             "largest_1d_drop_pct": round(largest_1d_drop, 2),
             "two_day_drop_pct": round(largest_2d_drop, 2),
@@ -5091,12 +5092,215 @@ def entry_ttm_rebound_strength(spring: dict) -> float:
         return 0
 
 
+
+
+def base_formation_state(df: pd.DataFrame, trough_date=None):
+    """Detect whether a panic low is starting to be accepted instead of broken.
+
+    This is the GRND June 8/9 signal: not a buy yet, but the market is no
+    longer making obvious new lows after the shock.
+    """
+    try:
+        if df is None or df.empty or len(df) < 12:
+            return 0, "⚪ Base unavailable", "Not enough candles to judge base formation."
+        d = df.dropna().copy()
+        low = d["Low"].astype(float)
+        high = d["High"].astype(float)
+        close = d["Close"].astype(float)
+        open_ = d["Open"].astype(float)
+
+        recent = d.tail(6)
+        l6 = recent["Low"].astype(float)
+        c6 = recent["Close"].astype(float)
+        h6 = recent["High"].astype(float)
+        o6 = recent["Open"].astype(float)
+        ranges = (h6 - l6).replace(0, pd.NA).dropna()
+
+        low_last_2 = float(l6.tail(2).min())
+        low_last_4 = float(l6.tail(4).min())
+        low_last_6 = float(l6.min())
+        no_new_low_2 = low_last_2 >= low_last_6 * 0.995
+        no_new_low_4 = low_last_4 >= low_last_6 * 0.995
+
+        # Range contraction after the panic candle is a clue that the panic is cooling.
+        range_score = 50
+        if len(ranges) >= 5:
+            early_range = float(ranges.iloc[:2].mean())
+            late_range = float(ranges.iloc[-2:].mean())
+            if early_range > 0:
+                contraction = 1 - (late_range / early_range)
+                if contraction >= 0.35:
+                    range_score = 90
+                elif contraction >= 0.15:
+                    range_score = 72
+                elif contraction >= -0.05:
+                    range_score = 55
+                else:
+                    range_score = 25
+
+        # Closing location: buyers stepping in often means closes migrate away from lows.
+        close_loc_score = 50
+        locs = []
+        for _, row in recent.tail(3).iterrows():
+            rng = float(row["High"] - row["Low"])
+            if rng > 0:
+                locs.append(float((row["Close"] - row["Low"]) / rng))
+        if locs:
+            avg_loc = sum(locs) / len(locs)
+            if avg_loc >= 0.65:
+                close_loc_score = 85
+            elif avg_loc >= 0.50:
+                close_loc_score = 70
+            elif avg_loc >= 0.35:
+                close_loc_score = 50
+            else:
+                close_loc_score = 25
+
+        higher_close_score = 75 if float(c6.iloc[-1]) > float(c6.iloc[-2]) else (55 if float(c6.iloc[-1]) >= float(c6.tail(3).min()) else 25)
+        low_score = 95 if no_new_low_4 else (75 if no_new_low_2 else 20)
+        score = clamp(0.45 * low_score + 0.25 * range_score + 0.20 * close_loc_score + 0.10 * higher_close_score)
+
+        if score >= 80:
+            label = "🟢 Base forming"
+        elif score >= 60:
+            label = "🟡 Possible base"
+        elif score >= 40:
+            label = "⚪ Base unclear"
+        else:
+            label = "🔴 Still breaking lows"
+        reason = (
+            f"Base score {int(round(score))}/100. New low last 4 bars: {'no' if no_new_low_4 else 'yes'}; "
+            f"recent ranges {'contracting' if range_score >= 70 else 'not clearly contracting'}; "
+            f"recent closes {'holding off lows' if close_loc_score >= 70 else 'still weak/mixed'}."
+        )
+        return int(round(score)), label, reason
+    except Exception as e:
+        return 0, "⚪ Base unavailable", f"Base formation calculation failed: {e}"
+
+
+def daily_repair_state(df: pd.DataFrame):
+    """Daily repair is the Early Watch engine.
+
+    It looks for the GRND-style moment where the daily is still damaged, but
+    TTM and MACD are improving sharply from day to day.
+    """
+    try:
+        if df is None or df.empty or len(df) < 70:
+            return {
+                "daily_repair_score": 0,
+                "daily_repair_label": "⚪ Daily repair unavailable",
+                "daily_repair_reason": "Not enough daily history.",
+                "daily_ttm_repair_score": 0,
+                "daily_macd_repair_score": 0,
+                "base_score": 0,
+                "base_label": "⚪ Base unavailable",
+                "base_reason": "Not enough daily history.",
+            }
+        d = df.dropna().copy()
+        close = d["Close"].astype(float)
+        rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi().dropna()
+        rsi_now = float(rsi_series.iloc[-1]) if len(rsi_series) else 50
+
+        spring = compute_ttm_spring(d)
+        mom = spring.get("ttm_momentum_series", pd.Series(dtype=float)).dropna()
+        ttm_score = 0
+        ttm_reason = "TTM unavailable."
+        if len(mom) >= 5:
+            vals = [float(x) for x in mom.tail(5).tolist()]
+            now, prev, prev2, prev3 = vals[-1], vals[-2], vals[-3], vals[-4]
+            improving_1 = now > prev
+            improving_3 = now > prev > prev2
+            improving_4 = now > prev > prev2 > prev3
+            negative_but_repairing = now < 0 and improving_1
+            if improving_4 and negative_but_repairing:
+                ttm_score = 95
+            elif improving_3 and negative_but_repairing:
+                ttm_score = 85
+            elif improving_1 and negative_but_repairing:
+                ttm_score = 68
+            elif now >= 0 and improving_1:
+                ttm_score = 65
+            elif improving_1:
+                ttm_score = 50
+            else:
+                ttm_score = 15
+            ttm_reason = "Daily TTM momentum: " + " → ".join(f"{v:.2f}" for v in vals[-4:])
+
+        macd_ind = ta.trend.MACD(close)
+        diff = (macd_ind.macd() - macd_ind.macd_signal()).dropna()
+        macd_repair_score = 0
+        macd_reason = "MACD unavailable."
+        if len(diff) >= 5:
+            vals = [float(x) for x in diff.tail(5).tolist()]
+            now, prev, prev2, prev3 = vals[-1], vals[-2], vals[-3], vals[-4]
+            improving_1 = now > prev
+            improving_3 = now > prev > prev2
+            improving_4 = now > prev > prev2 > prev3
+            if improving_4 and now < 0:
+                macd_repair_score = 95
+            elif improving_3 and now < 0:
+                macd_repair_score = 85
+            elif improving_1 and now < 0:
+                macd_repair_score = 68
+            elif now >= 0 and improving_1:
+                macd_repair_score = 70
+            elif improving_1:
+                macd_repair_score = 50
+            else:
+                macd_repair_score = 15
+            macd_reason = "Daily MACD histogram: " + " → ".join(f"{v:.2f}" for v in vals[-4:])
+
+        base_score, base_label, base_reason = base_formation_state(d)
+        # Early Watch sweet spot: daily RSI is still damaged but not hopeless.
+        if 25 <= rsi_now <= 45:
+            rsi_zone_score = 90
+        elif 20 <= rsi_now < 25:
+            rsi_zone_score = 70
+        elif 45 < rsi_now <= 52:
+            rsi_zone_score = 55
+        else:
+            rsi_zone_score = 30
+
+        repair_score = clamp(0.30 * ttm_score + 0.30 * macd_repair_score + 0.25 * base_score + 0.15 * rsi_zone_score)
+        if repair_score >= 80:
+            label = "🟢 Daily repair starting"
+        elif repair_score >= 62:
+            label = "🟡 Daily repair developing"
+        elif repair_score >= 45:
+            label = "⚪ Daily repair unclear"
+        else:
+            label = "🔴 Daily still breaking"
+        reason = f"{label}: {ttm_reason}. {macd_reason}. {base_reason} RSI now {rsi_now:.1f}."
+        return {
+            "daily_repair_score": int(round(repair_score)),
+            "daily_repair_label": label,
+            "daily_repair_reason": reason,
+            "daily_ttm_repair_score": int(round(ttm_score)),
+            "daily_macd_repair_score": int(round(macd_repair_score)),
+            "base_score": int(round(base_score)),
+            "base_label": base_label,
+            "base_reason": base_reason,
+            "daily_rsi_now": round(rsi_now, 1),
+        }
+    except Exception as e:
+        return {
+            "daily_repair_score": 0,
+            "daily_repair_label": "⚪ Daily repair unavailable",
+            "daily_repair_reason": f"Daily repair calculation failed: {e}",
+            "daily_ttm_repair_score": 0,
+            "daily_macd_repair_score": 0,
+            "base_score": 0,
+            "base_label": "⚪ Base unavailable",
+            "base_reason": "Base calculation failed.",
+        }
+
 @st.cache_data(ttl=900, show_spinner=False)
 def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days: int, include_news_lookup: bool = True):
-    """Entry Hunter: intentionally picky weekly swing-entry detector.
+    """V13.6 Recovery Pipeline.
 
-    It first checks the actual entry recipe cheaply, then pulls the deeper
-    scanner/news read only for stocks that have a real shot.
+    Returns either an Early Watch developing setup or an Entry Hunter ready-now
+    setup. This prevents GRND-like opportunities from being invisible on the
+    exact days they should be put on Amber's desk.
     """
     try:
         market_cap = get_market_cap_estimate(ticker)
@@ -5111,21 +5315,22 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         volume = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(index=df.index, dtype=float)
         current_price = float(close.iloc[-1])
 
-        drop = recent_fast_drop(close, volume, lookback=12, max_days=5)
+        # Look back far enough to catch a GRND-like panic that took a full week,
+        # while still rejecting slow multi-week ICE-style drifts.
+        drop = recent_fast_drop(close, volume, lookback=18, max_days=10)
         drop_pct = float(drop.get("drop_pct") or 0)
-        drop_days = drop.get("drop_days")
-        # True panic requirement: avoid gradual drifts. We want a shock event
-        # large enough to create a tradable rebound, but not a broken-story wipeout.
-        panic_days = drop.get("drop_days") or 99
+        drop_days = drop.get("drop_days") or 99
         panic_signature = float(drop.get("panic_signature_score") or 0)
         has_panic_candle = bool(drop.get("has_panic_candle"))
-        if drop_pct < 10 or drop_pct > 30:
+        if drop_pct < 10 or drop_pct > 32:
             return None
-        if panic_days > 5:
+        if drop_days > 10:
             return None
-        if not has_panic_candle:
+        # If the move took longer than 5 days, require stronger evidence it was
+        # still a true emotional move rather than a boring fade.
+        if drop_days > 5 and panic_signature < 70:
             return None
-        if panic_signature < 60:
+        if not has_panic_candle and panic_signature < 70:
             return None
 
         rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
@@ -5138,24 +5343,29 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
             return None
         days_since_under = len(rsi_series) - 1 - under_positions[-1]
         rsi_low_recent = float(rsi_series.iloc[max(0, len(rsi_series)-45):].min())
-        rsi_recovered = days_since_under <= 35 and current_rsi > 30 and current_rsi <= 55
-        if not rsi_recovered:
+        # Early Watch can still be sub-30; Entry Hunter wants recovery above 30.
+        if current_rsi > 58:
             return None
-        # Sweet spot is above oversold but not already hot.
-        if 35 <= current_rsi <= 45:
+        if days_since_under > 35:
+            return None
+        if 25 <= current_rsi <= 45:
             rsi_score = 100
-        elif 30 < current_rsi < 35:
-            rsi_score = 85
+        elif 20 <= current_rsi < 25:
+            rsi_score = 72
         elif 45 < current_rsi <= 50:
-            rsi_score = 80
-        else:
+            rsi_score = 78
+        elif 50 < current_rsi <= 55:
             rsi_score = 55
+        else:
+            rsi_score = 45
+
+        repair = daily_repair_state(df)
+        daily_repair_score = float(repair.get("daily_repair_score") or 0)
+        base_score = float(repair.get("base_score") or 0)
 
         macd_score, macd_label, macd_reason = macd_entry_state(close)
         ema_score, ema_label, ema_reason = ema_entry_state(close)
 
-        # Entry Hunter timing layer: 1H and 4H must both be rebounding.
-        # 4H is the main swing-entry trigger; 1H confirms that the turn is active now.
         oneh = _download_intraday_spring(ticker, "1H")
         oneh_spring = oneh.get("spring", {}) if isinstance(oneh, dict) else {}
         oneh_score = entry_ttm_rebound_strength(oneh_spring)
@@ -5168,77 +5378,87 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         fourh_label = fourh_spring.get("spring_label", "⚪ 4H unavailable")
         fourh_reason = fourh_spring.get("spring_reason", "4H trigger unavailable.")
 
-        # Daily TTM is a bonus, not a gate. Daily often lags your entry.
         daily_spring = compute_ttm_spring(df) if len(df) >= 60 else {"spring_score": 0, "spring_label": "⚪ 1D unavailable", "spring_reason": "Not enough daily history."}
         daily_score = entry_ttm_rebound_strength(daily_spring)
         daily_label = daily_spring.get("spring_label", "⚪ 1D unavailable")
         daily_reason = daily_spring.get("spring_reason", "1D trigger unavailable.")
 
-        # Entry Hunter is intentionally picky: the shorter and tactical timeframes
-        # must be turning upward. The daily can still be repairing.
-        if not entry_ttm_is_rebounding(oneh_spring):
-            return None
-        if not entry_ttm_is_rebounding(fourh_spring):
-            return None
-
-        # Panic quality now uses the sharper panic signature: magnitude + velocity
-        # + ugly candle + volume. FOXA-style impact days score high; ICE-style slow
-        # fades should not survive the gate.
         panic_quality = float(drop.get("panic_signature_score") or 0)
-        # Keep the sweet spot around 10-22%; very large drops can still work, but
-        # they may reflect a more serious story break.
-        if 10 <= drop_pct <= 22 and drop_days is not None and drop_days <= 5:
-            panic_quality = max(panic_quality, 88)
-        elif 22 < drop_pct <= 30 and drop_days is not None and drop_days <= 5:
-            panic_quality = max(min(panic_quality, 88), 72)
+        # GRND-style 6-10 day panic can still be excellent, but it gets a modest
+        # velocity haircut compared with FOXA-style impact days.
+        if 10 <= drop_pct <= 22 and drop_days <= 5:
+            panic_quality = max(panic_quality, 92)
+        elif 10 <= drop_pct <= 25 and drop_days <= 10:
+            panic_quality = max(panic_quality, 78)
+        elif 25 < drop_pct <= 32 and drop_days <= 10:
+            panic_quality = max(min(panic_quality, 88), 70)
 
-        daily_bonus = 100 if entry_ttm_is_rebounding(daily_spring) else max(0, min(daily_score, 55))
-
-        entry_score = int(round(clamp(
-            0.25 * fourh_score +
-            0.15 * oneh_score +
-            0.30 * panic_quality +
-            0.15 * rsi_score +
-            0.10 * ema_score +
-            0.03 * macd_score +
-            0.02 * daily_bonus
+        setup_quality = int(round(clamp(
+            0.38 * panic_quality +
+            0.27 * daily_repair_score +
+            0.18 * base_score +
+            0.12 * rsi_score +
+            0.05 * max(daily_score, repair.get("daily_ttm_repair_score", 0) or 0)
         )))
-        if entry_score < 70:
+        entry_timing = int(round(clamp(
+            0.30 * fourh_score +
+            0.20 * oneh_score +
+            0.16 * ema_score +
+            0.14 * macd_score +
+            0.12 * rsi_score +
+            0.08 * max(daily_score, daily_repair_score)
+        )))
+
+        oneh_ok = entry_ttm_is_rebounding(oneh_spring)
+        fourh_ok = entry_ttm_is_rebounding(fourh_spring)
+        daily_ok = daily_repair_score >= 55 or entry_ttm_is_rebounding(daily_spring)
+
+        if oneh_ok and fourh_ok and current_rsi > 30 and entry_timing >= 65:
+            pipeline_stage = "⚡ Entry Hunter"
+            pipeline_rank_score = int(round(clamp(0.58 * entry_timing + 0.42 * setup_quality)))
+            stage_note = "Lower timeframes are confirming. This is a possible today/tomorrow entry candidate."
+        elif setup_quality >= 62 and daily_ok and current_rsi <= 52:
+            pipeline_stage = "👀 Early Watch"
+            pipeline_rank_score = setup_quality
+            stage_note = "Panic has occurred and the daily chart is beginning to repair. Watch 1H/4H for a trigger."
+        else:
+            return None
+
+        # Avoid showing names where the first move is likely mature.
+        if pipeline_stage == "⚡ Entry Hunter" and current_rsi > 55 and days_since_under >= 6:
             return None
 
         deep = compute_candidate(ticker, profit_target, bounce_days, include_news_lookup, "1D") or {}
         result = dict(deep) if deep else {"ticker": ticker, "price": round(current_price, 2), "df": df, "rsi_series": rsi_series}
 
-        if entry_score >= 92:
+        if pipeline_rank_score >= 92:
             grade = "A+"
-        elif entry_score >= 85:
+        elif pipeline_rank_score >= 85:
             grade = "A"
-        elif entry_score >= 78:
+        elif pipeline_rank_score >= 78:
             grade = "B+"
         else:
             grade = "B"
 
         setup_age_bits = []
-        setup_age_bits.append(f"RSI recovered {int(days_since_under)} trading days ago" if days_since_under is not None else "RSI recovery age unknown")
-        if "Fresh" in macd_label:
-            setup_age_bits.append("MACD crossed recently")
-        elif "nearly" in macd_label.lower():
-            setup_age_bits.append("MACD converging")
-        if "gap closing fast" in ema_label.lower() or "compression" in ema_label.lower():
-            setup_age_bits.append("EMA gap compressing")
-        elif "Fresh" in ema_label:
-            setup_age_bits.append("EMA crossed recently")
-        elif "close" in ema_label.lower():
-            setup_age_bits.append("EMA gap closing")
-        setup_age_bits.append(f"1H trigger: {clean_label(oneh_label)}")
-        setup_age_bits.append(f"4H trigger: {clean_label(fourh_label)}")
-        setup_age_bits.append(f"1D spring: {clean_label(daily_label)}")
+        setup_age_bits.append(f"RSI oversold {int(days_since_under)} trading days ago" if days_since_under is not None else "RSI recovery age unknown")
+        setup_age_bits.append(f"Panic low {drop_days} trading days after peak")
+        setup_age_bits.append(f"Daily repair: {clean_label(repair.get('daily_repair_label','—'))}")
+        setup_age_bits.append(f"Base: {clean_label(repair.get('base_label','—'))}")
+        setup_age_bits.append(f"1H: {clean_label(oneh_label)}")
+        setup_age_bits.append(f"4H: {clean_label(fourh_label)}")
+
+        if pipeline_stage == "👀 Early Watch":
+            what_next = "Watch for 1H TTM to improve first, then 4H TTM/MACD convergence. A move into Entry Hunter means buyers are starting to step in."
+        else:
+            what_next = "Open the chart. Confirm price is holding the panic base and lower-timeframe momentum is still improving before entry."
 
         why = (
-            f"-{drop_pct:.1f}% true-panic drop in {drop_days or '?'} trading days; "
+            f"-{drop_pct:.1f}% panic in {drop_days} trading days; "
             f"largest 1D candle {drop.get('largest_1d_drop_pct', 0)}%; "
-            f"RSI recovered from {rsi_low_recent:.1f} to {current_rsi:.1f}; "
-            f"1H {clean_label(oneh_label)}; 4H {clean_label(fourh_label)}; 1D {clean_label(daily_label)}; "
+            f"daily repair {int(daily_repair_score)}/100; base {int(base_score)}/100; "
+            f"RSI moved from {rsi_low_recent:.1f} to {current_rsi:.1f}; "
+            f"1H {clean_label(oneh_label)}; 4H {clean_label(fourh_label)}; "
             f"{clean_label(ema_label)}; {clean_label(macd_label)}."
         )
 
@@ -5246,9 +5466,13 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
             "ticker": ticker,
             "price": round(current_price, 2),
             "market_cap": market_cap,
-            "entry_score": entry_score,
+            "pipeline_stage": pipeline_stage,
+            "pipeline_rank_score": pipeline_rank_score,
+            "pipeline_stage_note": stage_note,
+            "pipeline_what_next": what_next,
+            "entry_score": pipeline_rank_score,
             "entry_grade": grade,
-            "entry_match_label": f"🏹 Entry Match {grade}",
+            "entry_match_label": f"🏹 {pipeline_stage} {grade}",
             "entry_why": why,
             "entry_setup_age": " · ".join(setup_age_bits),
             "entry_drop_pct": round(-abs(drop_pct), 2),
@@ -5264,6 +5488,14 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
             "entry_current_rsi": round(current_rsi, 1),
             "entry_rsi_score": int(round(rsi_score)),
             "entry_panic_quality": int(round(panic_quality)),
+            "setup_quality": setup_quality,
+            "entry_timing": entry_timing,
+            "daily_repair_score": int(round(daily_repair_score)),
+            "daily_repair_label": repair.get("daily_repair_label"),
+            "daily_repair_reason": repair.get("daily_repair_reason"),
+            "base_score": int(round(base_score)),
+            "base_label": repair.get("base_label"),
+            "base_reason": repair.get("base_reason"),
             "entry_macd_score": int(round(macd_score)),
             "entry_macd_label": macd_label,
             "entry_macd_reason": macd_reason,
@@ -5288,77 +5520,92 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
 
 
 def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict | None = None):
-    st.markdown("## ⚡ Entry Hunter")
-    st.caption("A picky weekly-entry workspace: true panic shock → RSI recovery → 1H+4H TTM rebound → EMA compression/MACD confirmation. Maximum 5 elite entries.")
+    st.markdown("## ⚡ Recovery Pipeline")
+    st.caption("Two-stage workspace: 👀 Early Watch finds wounded stocks beginning to heal; ⚡ Entry Hunter finds today/tomorrow candidates where 1H/4H are confirming.")
 
     if not results:
-        st.info("🦜 The kingdom is quiet. No elite Entry Hunter setups passed today. That can be the correct answer — patience protects the account.")
+        st.info("🦜 The kingdom is quiet. No panic-recovery setups passed today. That can be the correct answer — patience protects the account.")
         return
 
-    top = sorted(results, key=lambda r: float(r.get("entry_score", 0)), reverse=True)[:5]
-    st.markdown(f"### 🏹 Today's Elite Entries ({len(top)})")
+    early = sorted([r for r in results if str(r.get("pipeline_stage", "")).startswith("👀")], key=lambda r: float(r.get("pipeline_rank_score", r.get("entry_score", 0))), reverse=True)[:5]
+    ready = sorted([r for r in results if str(r.get("pipeline_stage", "")).startswith("⚡")], key=lambda r: float(r.get("pipeline_rank_score", r.get("entry_score", 0))), reverse=True)[:5]
 
-    for i, r in enumerate(top, start=1):
-        ticker = r.get("ticker", "—")
-        name = r.get("company_name") or r.get("shortName") or ticker
-        with st.container(border=True):
-            h1, h2, h3 = st.columns([2.2, 1, 1])
-            with h1:
-                st.markdown(f"### #{i} {ticker} — {name}")
-                st.markdown(f"**{r.get('entry_match_label', '🏹 Entry Match')}** · Score **{int(float(r.get('entry_score', 0)))}**")
-            with h2:
-                st.metric("Price", f"${_to_float(r.get('price'),0):.2f}")
-            with h3:
-                tgt = r.get("potential_sell_price")
-                st.metric("Target", f"${_to_float(tgt,0):.2f}" if tgt else "—")
+    def render_card_list(items, title, empty_msg):
+        st.markdown(title)
+        if not items:
+            st.info(empty_msg)
+            return
+        for i, r in enumerate(items, start=1):
+            ticker = r.get("ticker", "—")
+            name = r.get("company_name") or r.get("shortName") or ticker
+            with st.container(border=True):
+                h1, h2, h3, h4 = st.columns([2.2, 0.8, 0.8, 0.8])
+                with h1:
+                    st.markdown(f"### #{i} {ticker} — {name}")
+                    st.markdown(f"**{r.get('entry_match_label', '🏹 Recovery Setup')}** · Score **{int(float(r.get('pipeline_rank_score', r.get('entry_score', 0))))}**")
+                    st.caption(r.get("pipeline_stage_note", ""))
+                with h2:
+                    st.metric("Setup", f"{int(_to_float(r.get('setup_quality'),0))}")
+                with h3:
+                    st.metric("Timing", f"{int(_to_float(r.get('entry_timing'),0))}")
+                with h4:
+                    st.metric("Panic", f"{int(_to_float(r.get('entry_panic_quality'),0))}")
 
-            st.markdown(f"**Why it qualifies:** {r.get('entry_why','—')}")
-            st.caption(f"Setup age: {r.get('entry_setup_age','—')}")
+                st.markdown(f"**Why it is here:** {r.get('entry_why','—')}")
+                st.markdown(f"**What needs to happen next:** {r.get('pipeline_what_next','—')}")
+                st.caption(f"Setup age: {r.get('entry_setup_age','—')}")
 
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-            c1.metric("Panic Drop", f"{_to_float(r.get('entry_drop_pct'),0):.1f}%", f"{r.get('entry_drop_days') or '?'} days")
-            c2.metric("RSI", f"{_to_float(r.get('entry_current_rsi'),0):.1f}", f"low {_to_float(r.get('entry_rsi_low_recent'),0):.1f}")
-            c3.metric("1H TTM", f"{int(_to_float(r.get('entry_1h_score'),0))}", clean_label(r.get('entry_1h_label','—'))[:20])
-            c4.metric("4H TTM", f"{int(_to_float(r.get('entry_4h_score'),0))}", clean_label(r.get('entry_4h_label','—'))[:20])
-            c5.metric("1D TTM", f"{int(_to_float(r.get('entry_1d_score'),0))}", clean_label(r.get('entry_1d_label','—'))[:20])
-            c6.metric("EMA/MACD", f"{int(_to_float(r.get('entry_macd_score'),0))}/{int(_to_float(r.get('entry_ema_score'),0))}", f"{clean_label(r.get('entry_ema_label','—'))[:10]} · {clean_label(r.get('entry_macd_label','—'))[:10]}")
+                c1, c2, c3, c4, c5, c6 = st.columns(6)
+                c1.metric("Panic Drop", f"{_to_float(r.get('entry_drop_pct'),0):.1f}%", f"{r.get('entry_drop_days') or '?'} days")
+                c2.metric("RSI", f"{_to_float(r.get('entry_current_rsi'),0):.1f}", f"low {_to_float(r.get('entry_rsi_low_recent'),0):.1f}")
+                c3.metric("Daily Repair", f"{int(_to_float(r.get('daily_repair_score'),0))}", clean_label(r.get('daily_repair_label','—'))[:20])
+                c4.metric("Base", f"{int(_to_float(r.get('base_score'),0))}", clean_label(r.get('base_label','—'))[:20])
+                c5.metric("1H / 4H", f"{int(_to_float(r.get('entry_1h_score'),0))}/{int(_to_float(r.get('entry_4h_score'),0))}", f"{clean_label(r.get('entry_1h_label','—'))[:8]} · {clean_label(r.get('entry_4h_label','—'))[:8]}")
+                c6.metric("EMA / MACD", f"{int(_to_float(r.get('entry_ema_score'),0))}/{int(_to_float(r.get('entry_macd_score'),0))}", f"{clean_label(r.get('entry_ema_label','—'))[:8]} · {clean_label(r.get('entry_macd_label','—'))[:8]}")
 
-            st.markdown("#### Market Read")
-            event = r.get("event_type") or "No major event detected"
-            excuse = r.get("market_excuse") or r.get("catalyst_reason") or "No clear market excuse found."
-            verdict = r.get("analyst_verdict") or "Market read unavailable"
-            note = r.get("analyst_note") or r.get("reaction_analysis") or "No deeper news note available."
-            st.markdown(f"**Event:** {event}  \n**Market's Excuse:** {excuse}  \n**Verdict:** {verdict}  \n{note}")
+                st.markdown("#### Market Read")
+                event = r.get("event_type") or "No major event detected"
+                excuse = r.get("market_excuse") or r.get("catalyst_reason") or "No clear market excuse found."
+                verdict = r.get("analyst_verdict") or "Market read unavailable"
+                note = r.get("analyst_note") or r.get("reaction_analysis") or "No deeper news note available."
+                st.markdown(f"**Event:** {event}  \n**Market's Excuse:** {excuse}  \n**Verdict:** {verdict}  \n{note}")
 
-            with st.expander("Deep entry details", expanded=False):
-                st.write({
-                    "Entry Score": r.get("entry_score"),
-                    "Panic Quality": r.get("entry_panic_quality"),
-                    "RSI Score": r.get("entry_rsi_score"),
-                    "1H Trigger": r.get("entry_1h_reason"),
-                    "4H Trigger": r.get("entry_4h_reason"),
-                    "1D Trigger": r.get("entry_1d_reason"),
-                    "MACD": r.get("entry_macd_reason"),
-                    "EMA": r.get("entry_ema_reason"),
-                    "Opportunity Remaining": r.get("opportunity_remaining_pct"),
-                    "History Events": r.get("event_count"),
-                    "Analyst Verdict": r.get("analyst_verdict"),
-                })
-                fig = portfolio_chart(r.get("df"), f"{ticker} 1D", 0, r.get("potential_sell_price"))
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
-                fig4 = portfolio_chart(r.get("fourh_entry_df"), f"{ticker} 4H", 0, r.get("potential_sell_price"))
-                if fig4:
-                    st.plotly_chart(fig4, use_container_width=True)
-                fig1h = portfolio_chart(r.get("oneh_entry_df"), f"{ticker} 1H", 0, r.get("potential_sell_price"))
-                if fig1h:
-                    st.plotly_chart(fig1h, use_container_width=True)
+                with st.expander("Deep recovery details", expanded=False):
+                    st.write({
+                        "Pipeline Stage": r.get("pipeline_stage"),
+                        "Setup Quality": r.get("setup_quality"),
+                        "Entry Timing": r.get("entry_timing"),
+                        "Panic Quality": r.get("entry_panic_quality"),
+                        "Daily Repair": r.get("daily_repair_reason"),
+                        "Base Formation": r.get("base_reason"),
+                        "1H Trigger": r.get("entry_1h_reason"),
+                        "4H Trigger": r.get("entry_4h_reason"),
+                        "1D Trigger": r.get("entry_1d_reason"),
+                        "MACD": r.get("entry_macd_reason"),
+                        "EMA": r.get("entry_ema_reason"),
+                        "Opportunity Remaining": r.get("opportunity_remaining_pct"),
+                        "History Events": r.get("event_count"),
+                    })
+                    fig = portfolio_chart(r.get("df"), f"{ticker} 1D", 0, r.get("potential_sell_price"))
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+                    fig4 = portfolio_chart(r.get("fourh_entry_df"), f"{ticker} 4H", 0, r.get("potential_sell_price"))
+                    if fig4:
+                        st.plotly_chart(fig4, use_container_width=True)
+                    fig1h = portfolio_chart(r.get("oneh_entry_df"), f"{ticker} 1H", 0, r.get("potential_sell_price"))
+                    if fig1h:
+                        st.plotly_chart(fig1h, use_container_width=True)
 
-    df = pd.DataFrame([{k: v for k, v in r.items() if k not in ["df", "rsi_series", "spring_df", "fourh_entry_df", "oneh_entry_df", "ttm_momentum_series", "squeeze_on_series"]} for r in top])
-    keep_cols = [c for c in ["ticker", "entry_grade", "entry_score", "price", "potential_sell_price", "entry_drop_pct", "entry_drop_days", "entry_current_rsi", "entry_1h_label", "entry_4h_label", "entry_1d_label", "entry_macd_label", "entry_ema_label", "analyst_verdict"] if c in df.columns]
-    if keep_cols:
-        st.markdown("### Compact Entry Table")
-        st.dataframe(df[keep_cols], use_container_width=True, hide_index=True)
+    render_card_list(early, "### 👀 Early Watch — developing setups", "No Early Watch names today. No wounded stocks are healing cleanly yet.")
+    render_card_list(ready, "### ⚡ Entry Hunter — ready today/tomorrow", "No ready-now entries today. Watch Early Watch for names that may graduate soon.")
+
+    compact = early + ready
+    if compact:
+        df = pd.DataFrame([{k: v for k, v in r.items() if k not in ["df", "rsi_series", "spring_df", "fourh_entry_df", "oneh_entry_df", "ttm_momentum_series", "squeeze_on_series"]} for r in compact])
+        keep_cols = [c for c in ["ticker", "pipeline_stage", "entry_grade", "pipeline_rank_score", "setup_quality", "entry_timing", "price", "potential_sell_price", "entry_drop_pct", "entry_drop_days", "entry_current_rsi", "daily_repair_label", "base_label", "entry_1h_label", "entry_4h_label", "analyst_verdict"] if c in df.columns]
+        if keep_cols:
+            st.markdown("### Compact Recovery Pipeline Table")
+            st.dataframe(df[keep_cols], use_container_width=True, hide_index=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
@@ -5380,7 +5627,7 @@ if st.session_state.get("workspace_selector") == "⚡ Entry Hunter":
         with st.container(border=True):
             st.markdown("## ⚡ Entry Hunter")
             st.markdown(
-                "Find the few stocks that match your actual weekly-entry recipe: $2B+ market cap, a fast 5–25% panic drop, RSI recovery from oversold, EMA/MACD convergence, and 1H + 4H TTM rebound triggers."
+                "Run the Recovery Pipeline: Early Watch finds GRND-style developing panic repairs, while Entry Hunter finds today/tomorrow names with 1H + 4H confirmation."
             )
             st.caption("Choose a universe above, then click Run Swing Scan. This workspace is intentionally picky; zero results can be the correct answer.")
         st.stop()
@@ -5394,7 +5641,7 @@ if st.session_state.get("workspace_selector") == "⚡ Entry Hunter":
         if not all_tickers:
             st.warning("No tickers found. Check your custom list or choose another universe.")
             st.stop()
-        st.info(f"⚡ Entry Hunter scanning {len(all_tickers):,} tickers from {universe}…")
+        st.info(f"⚡ Recovery Pipeline scanning {len(all_tickers):,} tickers from {universe}…")
         progress = st.progress(0)
         status = st.empty()
         leaders_box = st.empty()
@@ -5415,10 +5662,10 @@ if st.session_state.get("workspace_selector") == "⚡ Entry Hunter":
                 if candidate:
                     results.append(candidate)
                 progress.progress(min(completed / max(len(all_tickers), 1), 1.0))
-                status.caption(f"Entry Hunter · scanned {completed:,} / {len(all_tickers):,} · latest: {ticker} · elite entries: {len(results):,}")
+                status.caption(f"Entry Hunter · scanned {completed:,} / {len(all_tickers):,} · latest: {ticker} · pipeline names: {len(results):,}")
                 if results and (completed % 50 == 0 or completed == len(all_tickers)):
-                    preview = sorted(results, key=lambda r: float(r.get('entry_score', 0)), reverse=True)[:5]
-                    leaders_box.info("Live Entry Hunter leaders: " + " · ".join([f"{r.get('ticker')} {r.get('entry_grade')} {r.get('entry_score')}" for r in preview]))
+                    preview = sorted(results, key=lambda r: float(r.get('pipeline_rank_score', r.get('entry_score', 0))), reverse=True)[:5]
+                    leaders_box.info("Live Recovery Pipeline leaders: " + " · ".join([f"{r.get('ticker')} {r.get('entry_grade')} {r.get('entry_score')}" for r in preview]))
         progress.empty(); status.empty(); leaders_box.empty()
         st.session_state.entry_hunter_results = sorted(results, key=lambda r: float(r.get("entry_score", 0)), reverse=True)
         st.session_state.entry_hunter_meta = {
@@ -5429,7 +5676,7 @@ if st.session_state.get("workspace_selector") == "⚡ Entry Hunter":
 
     meta_e = st.session_state.entry_hunter_meta or {"universe": universe, "tickers_scanned": 0, "run_date": "current session"}
     st.markdown(
-        f"<div class='small-muted'>Entry Hunter scan: {html.escape(str(meta_e.get('universe')))} · {int(meta_e.get('tickers_scanned', 0)):,} tickers · {html.escape(str(meta_e.get('run_date','')))}</div>",
+        f"<div class='small-muted'>Recovery Pipeline scan: {html.escape(str(meta_e.get('universe')))} · {int(meta_e.get('tickers_scanned', 0)):,} tickers · {html.escape(str(meta_e.get('run_date','')))}</div>",
         unsafe_allow_html=True,
     )
     render_entry_hunter_workspace(st.session_state.entry_hunter_results or [], meta_e.get("universe", universe), meta_e)
