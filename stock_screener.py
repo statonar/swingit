@@ -4944,6 +4944,43 @@ def ema_entry_state(close: pd.Series):
         return 0, "⚪ EMA unavailable", "EMA calculation failed."
 
 
+def entry_ttm_is_rebounding(spring: dict) -> bool:
+    """Entry Hunter tactical TTM gate.
+
+    We do not require a perfect positive TTM. We want the lower timeframe to
+    be curling/rebounding: Early Turn, Fired Up, Loaded & Improving, or a
+    constructive spring score.
+    """
+    try:
+        label = str(spring.get("spring_label", "")).lower()
+        score = float(spring.get("spring_score", 0) or 0)
+        positive_words = ["early turn", "fired up", "loaded & improving", "loaded and improving", "improving", "tactical curl"]
+        bad_words = ["accelerating down", "fired down", "weakening"]
+        if any(w in label for w in bad_words):
+            return False
+        if any(w in label for w in positive_words):
+            return True
+        return score >= 60
+    except Exception:
+        return False
+
+def entry_ttm_rebound_strength(spring: dict) -> float:
+    try:
+        label = str(spring.get("spring_label", "")).lower()
+        score = float(spring.get("spring_score", 0) or 0)
+        if "fired up" in label:
+            return max(score, 92)
+        if "early turn" in label or "tactical curl" in label:
+            return max(score, 78)
+        if "loaded" in label and "improving" in label:
+            return max(score, 82)
+        if "improving" in label:
+            return max(score, 72)
+        return score
+    except Exception:
+        return 0
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days: int, include_news_lookup: bool = True):
     """Entry Hunter: intentionally picky weekly swing-entry detector.
@@ -4996,32 +5033,56 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         macd_score, macd_label, macd_reason = macd_entry_state(close)
         ema_score, ema_label, ema_reason = ema_entry_state(close)
 
-        # 4H trigger is the most important timing layer.
+        # Entry Hunter timing layer: 1H and 4H must both be rebounding.
+        # 4H is the main swing-entry trigger; 1H confirms that the turn is active now.
+        oneh = _download_intraday_spring(ticker, "1H")
+        oneh_spring = oneh.get("spring", {}) if isinstance(oneh, dict) else {}
+        oneh_score = entry_ttm_rebound_strength(oneh_spring)
+        oneh_label = oneh_spring.get("spring_label", "⚪ 1H unavailable")
+        oneh_reason = oneh_spring.get("spring_reason", "1H trigger unavailable.")
+
         fourh = _download_intraday_spring(ticker, "4H")
         fourh_spring = fourh.get("spring", {}) if isinstance(fourh, dict) else {}
-        fourh_score = float(fourh_spring.get("spring_score", 0) or 0)
+        fourh_score = entry_ttm_rebound_strength(fourh_spring)
         fourh_label = fourh_spring.get("spring_label", "⚪ 4H unavailable")
         fourh_reason = fourh_spring.get("spring_reason", "4H trigger unavailable.")
 
-        # Entry Hunter should not surface names where the 4H is still truly ugly.
-        fourh_text = str(fourh_label).lower()
-        if fourh_score < 45 and not any(x in fourh_text for x in ["early", "turn", "improving", "fired"]):
+        # Daily TTM is a bonus, not a gate. Daily often lags your entry.
+        daily_spring = compute_ttm_spring(df) if len(df) >= 60 else {"spring_score": 0, "spring_label": "⚪ 1D unavailable", "spring_reason": "Not enough daily history."}
+        daily_score = entry_ttm_rebound_strength(daily_spring)
+        daily_label = daily_spring.get("spring_label", "⚪ 1D unavailable")
+        daily_reason = daily_spring.get("spring_reason", "1D trigger unavailable.")
+
+        # Entry Hunter is intentionally picky: the shorter and tactical timeframes
+        # must be turning upward. The daily can still be repairing.
+        if not entry_ttm_is_rebounding(oneh_spring):
+            return None
+        if not entry_ttm_is_rebounding(fourh_spring):
             return None
 
-        # Panic quality favors a quick, meaningful, but not catastrophic drop.
-        if 8 <= drop_pct <= 20 and drop_days is not None and drop_days <= 5:
+        # Panic quality favors larger quick drops because you only aim to capture
+        # a piece of the rebound. Too small = not enough meat; too huge = possible broken story.
+        if 10 <= drop_pct <= 22 and drop_days is not None and drop_days <= 5:
             panic_quality = 100
-        elif 5 <= drop_pct <= 25 and drop_days is not None and drop_days <= 7:
-            panic_quality = 80
+        elif 8 <= drop_pct < 10 and drop_days is not None and drop_days <= 5:
+            panic_quality = 88
+        elif 5 <= drop_pct < 8 and drop_days is not None and drop_days <= 7:
+            panic_quality = 72
+        elif 22 < drop_pct <= 25 and drop_days is not None and drop_days <= 7:
+            panic_quality = 82
         else:
             panic_quality = 55
 
+        daily_bonus = 100 if entry_ttm_is_rebounding(daily_spring) else max(0, min(daily_score, 55))
+
         entry_score = int(round(clamp(
-            0.30 * fourh_score +
-            0.25 * rsi_score +
-            0.20 * panic_quality +
-            0.15 * ema_score +
-            0.10 * macd_score
+            0.25 * fourh_score +
+            0.20 * oneh_score +
+            0.25 * panic_quality +
+            0.15 * rsi_score +
+            0.07 * ema_score +
+            0.05 * macd_score +
+            0.03 * daily_bonus
         )))
         if entry_score < 70:
             return None
@@ -5048,11 +5109,14 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
             setup_age_bits.append("EMA crossed recently")
         elif "nearly" in ema_label.lower():
             setup_age_bits.append("EMA nearly crossed")
+        setup_age_bits.append(f"1H trigger: {clean_label(oneh_label)}")
         setup_age_bits.append(f"4H trigger: {clean_label(fourh_label)}")
+        setup_age_bits.append(f"1D spring: {clean_label(daily_label)}")
 
         why = (
-            f"{drop_pct:.1f}% drop in {drop_days or '?'} trading days; RSI recovered from {rsi_low_recent:.1f} to {current_rsi:.1f}; "
-            f"{clean_label(fourh_label)}; {clean_label(macd_label)}; {clean_label(ema_label)}."
+            f"-{drop_pct:.1f}% panic drop in {drop_days or '?'} trading days; RSI recovered from {rsi_low_recent:.1f} to {current_rsi:.1f}; "
+            f"1H {clean_label(oneh_label)}; 4H {clean_label(fourh_label)}; 1D {clean_label(daily_label)}; "
+            f"{clean_label(macd_label)}; {clean_label(ema_label)}."
         )
 
         result.update({
@@ -5064,7 +5128,8 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
             "entry_match_label": f"🏹 Entry Match {grade}",
             "entry_why": why,
             "entry_setup_age": " · ".join(setup_age_bits),
-            "entry_drop_pct": round(drop_pct, 2),
+            "entry_drop_pct": round(-abs(drop_pct), 2),
+            "entry_drop_abs_pct": round(abs(drop_pct), 2),
             "entry_drop_days": drop_days,
             "entry_drop_trough_date": drop.get("trough_date"),
             "entry_rsi_low_recent": round(rsi_low_recent, 1),
@@ -5077,9 +5142,16 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
             "entry_ema_score": int(round(ema_score)),
             "entry_ema_label": ema_label,
             "entry_ema_reason": ema_reason,
+            "entry_1h_score": int(round(oneh_score)),
+            "entry_1h_label": oneh_label,
+            "entry_1h_reason": oneh_reason,
             "entry_4h_score": int(round(fourh_score)),
             "entry_4h_label": fourh_label,
             "entry_4h_reason": fourh_reason,
+            "entry_1d_score": int(round(daily_score)),
+            "entry_1d_label": daily_label,
+            "entry_1d_reason": daily_reason,
+            "oneh_entry_df": oneh.get("df") if isinstance(oneh, dict) else None,
             "fourh_entry_df": fourh.get("df") if isinstance(fourh, dict) else None,
         })
         return result
@@ -5089,7 +5161,7 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
 
 def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict | None = None):
     st.markdown("## ⚡ Entry Hunter")
-    st.caption("A picky weekly-entry workspace: fast panic drop → RSI recovery → 4H trigger → MACD/EMA turn. Maximum 5 elite entries.")
+    st.caption("A picky weekly-entry workspace: fast panic drop → RSI recovery → 1H+4H TTM rebound → MACD/EMA turn. Maximum 5 elite entries.")
 
     if not results:
         st.info("🦜 The kingdom is quiet. No elite Entry Hunter setups passed today. That can be the correct answer — patience protects the account.")
@@ -5115,12 +5187,13 @@ def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict 
             st.markdown(f"**Why it qualifies:** {r.get('entry_why','—')}")
             st.caption(f"Setup age: {r.get('entry_setup_age','—')}")
 
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Panic", f"{_to_float(r.get('entry_drop_pct'),0):.1f}%", f"{r.get('entry_drop_days') or '?'} days")
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            c1.metric("Panic Drop", f"{_to_float(r.get('entry_drop_pct'),0):.1f}%", f"{r.get('entry_drop_days') or '?'} days")
             c2.metric("RSI", f"{_to_float(r.get('entry_current_rsi'),0):.1f}", f"low {_to_float(r.get('entry_rsi_low_recent'),0):.1f}")
-            c3.metric("4H Trigger", f"{int(_to_float(r.get('entry_4h_score'),0))}", clean_label(r.get('entry_4h_label','—'))[:22])
-            c4.metric("MACD", f"{int(_to_float(r.get('entry_macd_score'),0))}", clean_label(r.get('entry_macd_label','—'))[:22])
-            c5.metric("EMA 9/15", f"{int(_to_float(r.get('entry_ema_score'),0))}", clean_label(r.get('entry_ema_label','—'))[:22])
+            c3.metric("1H TTM", f"{int(_to_float(r.get('entry_1h_score'),0))}", clean_label(r.get('entry_1h_label','—'))[:20])
+            c4.metric("4H TTM", f"{int(_to_float(r.get('entry_4h_score'),0))}", clean_label(r.get('entry_4h_label','—'))[:20])
+            c5.metric("1D TTM", f"{int(_to_float(r.get('entry_1d_score'),0))}", clean_label(r.get('entry_1d_label','—'))[:20])
+            c6.metric("MACD/EMA", f"{int(_to_float(r.get('entry_macd_score'),0))}/{int(_to_float(r.get('entry_ema_score'),0))}", f"{clean_label(r.get('entry_macd_label','—'))[:10]} · {clean_label(r.get('entry_ema_label','—'))[:10]}")
 
             st.markdown("#### Market Read")
             event = r.get("event_type") or "No major event detected"
@@ -5134,7 +5207,9 @@ def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict 
                     "Entry Score": r.get("entry_score"),
                     "Panic Quality": r.get("entry_panic_quality"),
                     "RSI Score": r.get("entry_rsi_score"),
+                    "1H Trigger": r.get("entry_1h_reason"),
                     "4H Trigger": r.get("entry_4h_reason"),
+                    "1D Trigger": r.get("entry_1d_reason"),
                     "MACD": r.get("entry_macd_reason"),
                     "EMA": r.get("entry_ema_reason"),
                     "Opportunity Remaining": r.get("opportunity_remaining_pct"),
@@ -5147,9 +5222,12 @@ def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict 
                 fig4 = portfolio_chart(r.get("fourh_entry_df"), f"{ticker} 4H", 0, r.get("potential_sell_price"))
                 if fig4:
                     st.plotly_chart(fig4, use_container_width=True)
+                fig1h = portfolio_chart(r.get("oneh_entry_df"), f"{ticker} 1H", 0, r.get("potential_sell_price"))
+                if fig1h:
+                    st.plotly_chart(fig1h, use_container_width=True)
 
-    df = pd.DataFrame([{k: v for k, v in r.items() if k not in ["df", "rsi_series", "spring_df", "fourh_entry_df", "ttm_momentum_series", "squeeze_on_series"]} for r in top])
-    keep_cols = [c for c in ["ticker", "entry_grade", "entry_score", "price", "potential_sell_price", "entry_drop_pct", "entry_drop_days", "entry_current_rsi", "entry_4h_label", "entry_macd_label", "entry_ema_label", "analyst_verdict"] if c in df.columns]
+    df = pd.DataFrame([{k: v for k, v in r.items() if k not in ["df", "rsi_series", "spring_df", "fourh_entry_df", "oneh_entry_df", "ttm_momentum_series", "squeeze_on_series"]} for r in top])
+    keep_cols = [c for c in ["ticker", "entry_grade", "entry_score", "price", "potential_sell_price", "entry_drop_pct", "entry_drop_days", "entry_current_rsi", "entry_1h_label", "entry_4h_label", "entry_1d_label", "entry_macd_label", "entry_ema_label", "analyst_verdict"] if c in df.columns]
     if keep_cols:
         st.markdown("### Compact Entry Table")
         st.dataframe(df[keep_cols], use_container_width=True, hide_index=True)
@@ -5174,7 +5252,7 @@ if st.session_state.get("workspace_selector") == "⚡ Entry Hunter":
         with st.container(border=True):
             st.markdown("## ⚡ Entry Hunter")
             st.markdown(
-                "Find the few stocks that match your actual weekly-entry recipe: $2B+ market cap, a fast 5–25% panic drop, RSI recovery from oversold, MACD/EMA turn, and a 4H TTM trigger."
+                "Find the few stocks that match your actual weekly-entry recipe: $2B+ market cap, a fast 5–25% panic drop, RSI recovery from oversold, MACD/EMA turn, and 1H + 4H TTM rebound triggers."
             )
             st.caption("Choose a universe above, then click Run Swing Scan. This workspace is intentionally picky; zero results can be the correct answer.")
         st.stop()
