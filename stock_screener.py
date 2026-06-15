@@ -4855,14 +4855,36 @@ def get_market_cap_estimate(ticker: str):
     return None
 
 
-def recent_fast_drop(close: pd.Series, lookback: int = 12, max_days: int = 7):
-    """Find the sharpest recent peak-to-trough close drop inside the lookback window."""
+def recent_fast_drop(close: pd.Series, volume: pd.Series | None = None, lookback: int = 12, max_days: int = 5):
+    """Find a TRUE panic signature, not a slow drift.
+
+    Entry Hunter wants sharp shock events: roughly -10%+ in 1-5 trading days,
+    with at least one ugly daily candle or a two-day collapse. This avoids names
+    like ICE's recent slow walk lower while still catching FOXA-style impact days.
+    """
+    empty = {
+        "drop_pct": 0, "drop_days": None, "peak_date": None, "trough_date": None,
+        "trough_price": None, "peak_price": None, "largest_1d_drop_pct": 0,
+        "two_day_drop_pct": 0, "panic_volume_ratio": None, "panic_signature_score": 0,
+        "panic_signature_label": "⚪ No true panic"
+    }
     try:
         c = close.dropna().astype(float)
-        if len(c) < max(lookback, 8):
-            return {"drop_pct": 0, "drop_days": None, "peak_date": None, "trough_date": None, "trough_price": None}
+        if len(c) < max(lookback, 20):
+            return empty
+        v = None
+        if volume is not None:
+            try:
+                v = volume.reindex(c.index).astype(float)
+            except Exception:
+                v = None
         recent = c.tail(lookback)
-        best = {"drop_pct": 0, "drop_days": None, "peak_date": None, "trough_date": None, "trough_price": None}
+        daily_ret = (recent / recent.shift(1) - 1.0) * 100.0
+        two_day_ret = (recent / recent.shift(2) - 1.0) * 100.0
+        largest_1d_drop = float(daily_ret.min()) if not daily_ret.dropna().empty else 0.0
+        largest_2d_drop = float(two_day_ret.min()) if not two_day_ret.dropna().empty else 0.0
+
+        best = dict(empty)
         vals = list(recent.values)
         idxs = list(recent.index)
         for i in range(len(vals)):
@@ -4873,16 +4895,56 @@ def recent_fast_drop(close: pd.Series, lookback: int = 12, max_days: int = 7):
                 trough = vals[j]
                 drop = (peak - trough) / peak * 100.0
                 if drop > best["drop_pct"]:
-                    best = {
+                    best.update({
                         "drop_pct": float(drop),
                         "drop_days": int(j - i),
                         "peak_date": idxs[i].date() if hasattr(idxs[i], "date") else idxs[i],
                         "trough_date": idxs[j].date() if hasattr(idxs[j], "date") else idxs[j],
+                        "peak_price": float(peak),
                         "trough_price": float(trough),
-                    }
+                    })
+
+        drop_pct = float(best.get("drop_pct") or 0)
+        days = best.get("drop_days") or 99
+        has_panic_candle = largest_1d_drop <= -5.0 or largest_2d_drop <= -8.0
+
+        # Volume ratio on/near the trough day compared with prior 20 bars.
+        vr = None
+        if v is not None and best.get("trough_date") is not None:
+            try:
+                # Recover index location by using the stored recent index position.
+                trough_idx = idxs[vals.index(best.get("trough_price"))] if best.get("trough_price") in vals else recent.index[-1]
+                avg_vol = v.shift(1).rolling(20).mean().loc[trough_idx]
+                cur_vol = v.loc[trough_idx]
+                if avg_vol and avg_vol > 0 and cur_vol:
+                    vr = float(cur_vol) / float(avg_vol)
+            except Exception:
+                vr = None
+
+        magnitude_score = 0
+        if drop_pct >= 20: magnitude_score = 100
+        elif drop_pct >= 15: magnitude_score = 90
+        elif drop_pct >= 12: magnitude_score = 78
+        elif drop_pct >= 10: magnitude_score = 65
+        elif drop_pct >= 8: magnitude_score = 40
+
+        velocity_score = 100 if days <= 2 else (85 if days <= 3 else (70 if days <= 5 else 20))
+        candle_score = 100 if largest_1d_drop <= -8 else (80 if largest_1d_drop <= -5 else (75 if largest_2d_drop <= -8 else 10))
+        volume_score = _volume_score_from_ratio(vr) if vr else 35
+        sig = clamp(0.40*magnitude_score + 0.25*velocity_score + 0.22*candle_score + 0.13*volume_score)
+
+        label = "🔥 True panic" if sig >= 80 else ("🟡 Sharp selloff" if sig >= 60 else "⚪ Not sharp enough")
+        best.update({
+            "largest_1d_drop_pct": round(largest_1d_drop, 2),
+            "two_day_drop_pct": round(largest_2d_drop, 2),
+            "panic_volume_ratio": round(vr, 2) if vr else None,
+            "panic_signature_score": int(round(sig)),
+            "panic_signature_label": label,
+            "has_panic_candle": bool(has_panic_candle),
+        })
         return best
     except Exception:
-        return {"drop_pct": 0, "drop_days": None, "peak_date": None, "trough_date": None, "trough_price": None}
+        return empty
 
 
 def macd_entry_state(close: pd.Series):
@@ -5049,10 +5111,21 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         volume = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(index=df.index, dtype=float)
         current_price = float(close.iloc[-1])
 
-        drop = recent_fast_drop(close, lookback=12, max_days=7)
+        drop = recent_fast_drop(close, volume, lookback=12, max_days=5)
         drop_pct = float(drop.get("drop_pct") or 0)
         drop_days = drop.get("drop_days")
-        if drop_pct < 5 or drop_pct > 30:
+        # True panic requirement: avoid gradual drifts. We want a shock event
+        # large enough to create a tradable rebound, but not a broken-story wipeout.
+        panic_days = drop.get("drop_days") or 99
+        panic_signature = float(drop.get("panic_signature_score") or 0)
+        has_panic_candle = bool(drop.get("has_panic_candle"))
+        if drop_pct < 10 or drop_pct > 30:
+            return None
+        if panic_days > 5:
+            return None
+        if not has_panic_candle:
+            return None
+        if panic_signature < 60:
             return None
 
         rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
@@ -5108,18 +5181,16 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         if not entry_ttm_is_rebounding(fourh_spring):
             return None
 
-        # Panic quality favors larger quick drops because you only aim to capture
-        # a piece of the rebound. Too small = not enough meat; too huge = possible broken story.
+        # Panic quality now uses the sharper panic signature: magnitude + velocity
+        # + ugly candle + volume. FOXA-style impact days score high; ICE-style slow
+        # fades should not survive the gate.
+        panic_quality = float(drop.get("panic_signature_score") or 0)
+        # Keep the sweet spot around 10-22%; very large drops can still work, but
+        # they may reflect a more serious story break.
         if 10 <= drop_pct <= 22 and drop_days is not None and drop_days <= 5:
-            panic_quality = 100
-        elif 8 <= drop_pct < 10 and drop_days is not None and drop_days <= 5:
-            panic_quality = 88
-        elif 5 <= drop_pct < 8 and drop_days is not None and drop_days <= 7:
-            panic_quality = 72
-        elif 22 < drop_pct <= 25 and drop_days is not None and drop_days <= 7:
-            panic_quality = 82
-        else:
-            panic_quality = 55
+            panic_quality = max(panic_quality, 88)
+        elif 22 < drop_pct <= 30 and drop_days is not None and drop_days <= 5:
+            panic_quality = max(min(panic_quality, 88), 72)
 
         daily_bonus = 100 if entry_ttm_is_rebounding(daily_spring) else max(0, min(daily_score, 55))
 
@@ -5164,7 +5235,9 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         setup_age_bits.append(f"1D spring: {clean_label(daily_label)}")
 
         why = (
-            f"-{drop_pct:.1f}% panic drop in {drop_days or '?'} trading days; RSI recovered from {rsi_low_recent:.1f} to {current_rsi:.1f}; "
+            f"-{drop_pct:.1f}% true-panic drop in {drop_days or '?'} trading days; "
+            f"largest 1D candle {drop.get('largest_1d_drop_pct', 0)}%; "
+            f"RSI recovered from {rsi_low_recent:.1f} to {current_rsi:.1f}; "
             f"1H {clean_label(oneh_label)}; 4H {clean_label(fourh_label)}; 1D {clean_label(daily_label)}; "
             f"{clean_label(ema_label)}; {clean_label(macd_label)}."
         )
@@ -5182,6 +5255,11 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
             "entry_drop_abs_pct": round(abs(drop_pct), 2),
             "entry_drop_days": drop_days,
             "entry_drop_trough_date": drop.get("trough_date"),
+            "entry_panic_signature_score": int(round(float(drop.get("panic_signature_score") or panic_quality))),
+            "entry_panic_signature_label": drop.get("panic_signature_label"),
+            "entry_largest_1d_drop_pct": drop.get("largest_1d_drop_pct"),
+            "entry_two_day_drop_pct": drop.get("two_day_drop_pct"),
+            "entry_panic_volume_ratio": drop.get("panic_volume_ratio"),
             "entry_rsi_low_recent": round(rsi_low_recent, 1),
             "entry_current_rsi": round(current_rsi, 1),
             "entry_rsi_score": int(round(rsi_score)),
@@ -5211,7 +5289,7 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
 
 def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict | None = None):
     st.markdown("## ⚡ Entry Hunter")
-    st.caption("A picky weekly-entry workspace: fast panic drop → RSI recovery → 1H+4H TTM rebound → EMA compression/MACD confirmation. Maximum 5 elite entries.")
+    st.caption("A picky weekly-entry workspace: true panic shock → RSI recovery → 1H+4H TTM rebound → EMA compression/MACD confirmation. Maximum 5 elite entries.")
 
     if not results:
         st.info("🦜 The kingdom is quiet. No elite Entry Hunter setups passed today. That can be the correct answer — patience protects the account.")
