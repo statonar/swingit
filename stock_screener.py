@@ -1,5 +1,5 @@
 """
-SwingIt V11 — Universe Accuracy + Profile Defaults + Morning Report
+SwingIt V11.1 — Market Read Cleanup
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V11",
+    page_title="SwingIt V11.1",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -376,7 +376,7 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V11</div>
+            <div class="terminal-title">🔥 SwingIt V11.1</div>
             <div class="terminal-subtitle">RSI panic rebound candidates.</div>
             """,
             unsafe_allow_html=True,
@@ -3252,6 +3252,16 @@ def dot_class(value):
             return "dot-red"
         return "dot-gray"
 
+    # Market Read / News Intelligence verdicts
+    if "false panic" in text:
+        return "dot-green"
+    if "overdone" in text or "possible overreaction" in text:
+        return "dot-yellow"
+    if "fundamental damage" in text or "broken story" in text or "likely appropriate" in text:
+        return "dot-red"
+    if "no clear news" in text or "no meaningful" in text or "unclear event" in text:
+        return "dot-gray"
+
     if any(w in text for w in [
         "high", "positive", "fresh", "fired up", "loaded & improving",
         "building fast", "building", "improving", "oversold", "turn zone",
@@ -3510,7 +3520,7 @@ def hot_card(rank, row):
         {volume_trend_reason}
     """
     news_tip = f"""
-        <strong>V11 News Intelligence</strong><br>
+        <strong>Market Read</strong><br>
         Event type: {_safe_html(clean_label(event_type))}<br>
         Market's excuse: {_safe_html(market_excuse)}<br>
         Analyst verdict: {_safe_html(clean_label(analyst_verdict))}<br>
@@ -3524,7 +3534,7 @@ def hot_card(rank, row):
         {headline}<br><br>
         <strong>Catalyst score detail</strong><br>
         {catalyst_reason}<br><br>
-        News label: {news}
+        
     """
     overreaction_tip = f"""
         <strong>Overreaction</strong><br>
@@ -3572,8 +3582,7 @@ def hot_card(rank, row):
             {hover_item('Attention', clean_label(attention), attention_tip, dot=True)}
             {hover_item('Volume trend', clean_label(volume_trend), volume_trend_tip, dot=True)}
             {hover_item('Spring', f'{spring_tf} · {clean_label(spring)}', spring_score_tip, dot=True)}
-            {hover_item('News Read', f'{clean_label(event_type)} · {clean_label(analyst_verdict)}', news_tip, dot=True)}
-            {hover_item('News', clean_label(catalyst), news_tip, dot=True)}
+            {hover_item('Market Read', f'{clean_label(event_type)} · {clean_label(analyst_verdict)}', news_tip, dot=True)}
             {hover_item('Confidence', clean_label(confidence), confidence_tip, dot=True)}
             {hover_item('Institution', clean_label(institution), institution_tip, dot=True)}
         </div>
@@ -3856,7 +3865,7 @@ for r in results:
         "Narrative": r.get("narrative_label"),
         "Narrative Reason": r.get("narrative_reason"),
         "Red Flags": r.get("red_flag_label"),
-        "News Intel Score": r.get("news_intel_score"),
+        "Market Read Score": r.get("news_intel_score"),
         "Event Type": r.get("event_type"),
         "Market Excuse": r.get("market_excuse"),
         "Analyst Verdict": r.get("analyst_verdict"),
@@ -3889,7 +3898,6 @@ for r in results:
         "Volume Trend Reason": r.get("volume_trend_reason"),
         "Volume Ratio": r.get("volume_ratio"),
         "Volume Score": _volume_score_from_ratio(r.get("volume_ratio")),
-        "News": r.get("news_label"),
         "Headline": r.get("news_headline"),
         "History Score": r.get("history_score"),
         "Opportunity Score": r.get("opportunity_score"),
@@ -4133,7 +4141,7 @@ with st.expander("What the Swing Score means"):
 
     **Potential Swing Price** is not an analyst target. It is simply current price plus the stock’s average max bounce after prior RSI&lt;30 events within the selected swing window.
 
-    Current V11 uses multiple view-by lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (RSI opportunity, rebound stage, stabilization, catalyst/news, daily TTM spring, 4H trigger, attention/RVOL, and volume trend).
+    Current V11.1 uses multiple view-by lenses plus two core scores: **Swing Score** (46% historical swing behavior, 34% current RSI opportunity, 14% catalyst/news, 6% attention/RVOL) and **Setup Quality** (RSI opportunity, rebound stage, stabilization, catalyst/news, daily TTM spring, 4H trigger, attention/RVOL, and volume trend).
 
     **View By** defines what #1 means. 🎯 Target Hunter is the default for your 8% swing goal; ⚡ Ready Now is for what to open in ThinkorSwim first; 🧠 Highest Confidence is the safest historical pattern; 🚀 Maximum Upside is the biggest reward lens; 😱 Overreaction hunts likely false-panic selloffs; 🧊 Stabilizing Panics finds names where the panic may have stopped but the daily chart has not fully confirmed yet. **Opportunity Remaining** estimates how much of the usual RSI-panic rebound may still be left from the most recent panic-cycle low.
 
