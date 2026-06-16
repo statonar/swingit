@@ -5294,6 +5294,96 @@ def daily_repair_state(df: pd.DataFrame):
             "base_reason": "Base calculation failed.",
         }
 
+
+
+def trend_health_state(df: pd.DataFrame):
+    """Classify whether Entry Hunter is looking at a panic recovery or a long-term downtrend repair.
+
+    Amber-style Entry Hunter should prefer sudden panic recoveries in otherwise healthy/neutral
+    longer-term structures. It should avoid names that have been stair-stepping lower for months,
+    where a bounce is more likely to be a risky trend repair than a near-term panic recovery.
+    """
+    try:
+        if df is None or df.empty or "Close" not in df.columns:
+            return {"trend_score": 0, "trend_label": "⚪ Trend unavailable", "trend_type": "Unknown", "trend_reason": "Not enough daily data.", "trend_gate": "unknown"}
+        close = df["Close"].dropna().astype(float)
+        if len(close) < 90:
+            return {"trend_score": 45, "trend_label": "⚪ Trend limited", "trend_type": "Unknown", "trend_reason": "Less than 90 daily candles available, so long-term trend is less reliable.", "trend_gate": "neutral"}
+
+        price = float(close.iloc[-1])
+        sma50 = close.rolling(50).mean()
+        sma200 = close.rolling(200).mean()
+        ma50 = float(sma50.iloc[-1]) if pd.notna(sma50.iloc[-1]) else None
+        ma200 = float(sma200.iloc[-1]) if len(close) >= 200 and pd.notna(sma200.iloc[-1]) else None
+        ma50_slope = None
+        ma200_slope = None
+        if ma50 and len(sma50.dropna()) > 25 and pd.notna(sma50.iloc[-21]):
+            ma50_slope = (float(sma50.iloc[-1]) / float(sma50.iloc[-21]) - 1.0) * 100.0
+        if ma200 and len(sma200.dropna()) > 65 and pd.notna(sma200.iloc[-61]):
+            ma200_slope = (float(sma200.iloc[-1]) / float(sma200.iloc[-61]) - 1.0) * 100.0
+
+        ret20 = (price / float(close.iloc[-21]) - 1.0) * 100.0 if len(close) > 21 else 0.0
+        ret60 = (price / float(close.iloc[-61]) - 1.0) * 100.0 if len(close) > 61 else 0.0
+        ret90 = (price / float(close.iloc[-91]) - 1.0) * 100.0 if len(close) > 91 else ret60
+        dist200 = None
+        if ma200 and ma200 > 0:
+            dist200 = (price / ma200 - 1.0) * 100.0
+        dist50 = (price / ma50 - 1.0) * 100.0 if ma50 and ma50 > 0 else None
+
+        # Detect a sustained stair-step downtrend, not just a normal pullback.
+        recent_downtrend = ret60 <= -18 or ret90 <= -25
+        below_200_deep = dist200 is not None and dist200 <= -25
+        below_200_material = dist200 is not None and dist200 <= -18
+        ma_stack_bearish = bool(ma50 and ma200 and ma50 < ma200)
+        ma_slope_bad = (ma200_slope is not None and ma200_slope < -2.0) or (ma50_slope is not None and ma50_slope < -7.0)
+
+        if below_200_deep and (ma_stack_bearish or ma_slope_bad or recent_downtrend):
+            score = 8
+            label = "🔴 Broken downtrend"
+            ttype = "Trend Repair"
+            gate = "block"
+            reason = "Price is deeply below the 200-day average and the longer structure is deteriorating. This looks more like a risky trend repair than an immediate panic recovery."
+        elif below_200_material and (ma_stack_bearish or recent_downtrend):
+            score = 28
+            label = "🔴 Weak trend"
+            ttype = "Trend Repair"
+            gate = "penalty"
+            reason = "Price is materially below the 200-day average and the medium-term structure is weak. This can bounce, but it is not the clean panic-recovery style preferred for sub-30-day swings."
+        elif dist200 is not None and dist200 < -10:
+            score = 50
+            label = "🟡 Damaged but tradable"
+            ttype = "Panic Recovery / Repair"
+            gate = "neutral"
+            reason = "Price is below the 200-day average, but not deeply broken. Treat as higher risk unless the panic is very sharp and buyers return quickly."
+        elif ma50 and ma200 and ma50 > ma200 and (ma200_slope is None or ma200_slope >= -1.0):
+            score = 88
+            label = "🟢 Healthy prior trend"
+            ttype = "Panic Recovery"
+            gate = "pass"
+            reason = "The longer-term structure is healthy enough that the recent drop looks more like a panic pullback than a months-long repricing."
+        else:
+            score = 68
+            label = "🟡 Neutral trend"
+            ttype = "Panic Recovery"
+            gate = "pass"
+            reason = "The longer-term structure is mixed but not broken. This can qualify if the recent panic and lower-timeframe recovery are strong."
+
+        return {
+            "trend_score": int(round(clamp(score))),
+            "trend_label": label,
+            "trend_type": ttype,
+            "trend_reason": reason,
+            "trend_gate": gate,
+            "trend_price_vs_200_pct": round(dist200, 1) if dist200 is not None else None,
+            "trend_price_vs_50_pct": round(dist50, 1) if dist50 is not None else None,
+            "trend_60d_return_pct": round(ret60, 1),
+            "trend_90d_return_pct": round(ret90, 1),
+            "trend_200_slope_pct": round(ma200_slope, 1) if ma200_slope is not None else None,
+            "trend_50_slope_pct": round(ma50_slope, 1) if ma50_slope is not None else None,
+        }
+    except Exception:
+        return {"trend_score": 0, "trend_label": "⚪ Trend unavailable", "trend_type": "Unknown", "trend_reason": "Trend health calculation failed.", "trend_gate": "unknown"}
+
 @st.cache_data(ttl=900, show_spinner=False)
 def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days: int, include_news_lookup: bool = True):
     """V13.6 Recovery Pipeline.
@@ -5314,6 +5404,13 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         close = df["Close"].astype(float)
         volume = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(index=df.index, dtype=float)
         current_price = float(close.iloc[-1])
+
+        trend = trend_health_state(df)
+        trend_gate = str(trend.get("trend_gate", "neutral"))
+        # Entry Hunter is for panic recoveries, not months-long downtrend repairs.
+        # Broken trend names can still bounce, but they violate this workspace's style.
+        if trend_gate == "block":
+            return None
 
         # Look back far enough to catch a GRND-like panic that took a full week,
         # while still rejecting slow multi-week ICE-style drifts.
@@ -5393,13 +5490,17 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         elif 25 < drop_pct <= 32 and drop_days <= 10:
             panic_quality = max(min(panic_quality, 88), 70)
 
+        trend_score = float(trend.get("trend_score") or 50)
         setup_quality = int(round(clamp(
-            0.38 * panic_quality +
-            0.27 * daily_repair_score +
-            0.18 * base_score +
-            0.12 * rsi_score +
-            0.05 * max(daily_score, repair.get("daily_ttm_repair_score", 0) or 0)
+            0.34 * panic_quality +
+            0.23 * daily_repair_score +
+            0.16 * base_score +
+            0.11 * rsi_score +
+            0.06 * max(daily_score, repair.get("daily_ttm_repair_score", 0) or 0) +
+            0.10 * trend_score
         )))
+        if trend_gate == "penalty":
+            setup_quality = int(round(max(0, setup_quality - 18)))
         entry_timing = int(round(clamp(
             0.30 * fourh_score +
             0.20 * oneh_score +
@@ -5445,6 +5546,7 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
         setup_age_bits.append(f"Panic low {drop_days} trading days after peak")
         setup_age_bits.append(f"Daily repair: {clean_label(repair.get('daily_repair_label','—'))}")
         setup_age_bits.append(f"Base: {clean_label(repair.get('base_label','—'))}")
+        setup_age_bits.append(f"Trend: {clean_label(trend.get('trend_label','—'))}")
         setup_age_bits.append(f"1H: {clean_label(oneh_label)}")
         setup_age_bits.append(f"4H: {clean_label(fourh_label)}")
 
@@ -5457,6 +5559,7 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
             f"-{drop_pct:.1f}% panic in {drop_days} trading days; "
             f"largest 1D candle {drop.get('largest_1d_drop_pct', 0)}%; "
             f"daily repair {int(daily_repair_score)}/100; base {int(base_score)}/100; "
+            f"trend {clean_label(trend.get('trend_label','—'))}; "
             f"RSI moved from {rsi_low_recent:.1f} to {current_rsi:.1f}; "
             f"1H {clean_label(oneh_label)}; 4H {clean_label(fourh_label)}; "
             f"{clean_label(ema_label)}; {clean_label(macd_label)}."
@@ -5466,6 +5569,15 @@ def compute_entry_hunter_candidate(ticker: str, profit_target: int, bounce_days:
             "ticker": ticker,
             "price": round(current_price, 2),
             "market_cap": market_cap,
+            "trend_score": int(round(float(trend.get("trend_score") or 0))),
+            "trend_label": trend.get("trend_label"),
+            "trend_type": trend.get("trend_type"),
+            "trend_reason": trend.get("trend_reason"),
+            "trend_gate": trend.get("trend_gate"),
+            "trend_price_vs_200_pct": trend.get("trend_price_vs_200_pct"),
+            "trend_price_vs_50_pct": trend.get("trend_price_vs_50_pct"),
+            "trend_60d_return_pct": trend.get("trend_60d_return_pct"),
+            "trend_90d_return_pct": trend.get("trend_90d_return_pct"),
             "pipeline_stage": pipeline_stage,
             "pipeline_rank_score": pipeline_rank_score,
             "pipeline_stage_note": stage_note,
@@ -5573,6 +5685,7 @@ def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict 
         rsi = _to_float(r.get("entry_current_rsi"), 0)
         oneh = clean_label(r.get("entry_1h_label", "—"))
         fourh = clean_label(r.get("entry_4h_label", "—"))
+        trend = clean_label(r.get("trend_label", "—"))
         market = r.get("analyst_verdict") or r.get("event_type") or "Market read pending"
         nxt = r.get("pipeline_what_next") or "Watch lower timeframes for confirmation."
         return f"""
@@ -5587,6 +5700,7 @@ def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict 
                 <div class="entry-mini-metric">Panic<b>{panic}</b></div>
                 <div class="entry-mini-metric">Drop<b>{drop:.1f}% / {days}d</b></div>
                 <div class="entry-mini-metric">RSI<b>{rsi:.1f}</b></div>
+                <div class="entry-mini-metric">Trend<b>{_short(trend, 16)}</b></div>
                 <div class="entry-mini-metric">1H / 4H<b>{_short(oneh, 8)} · {_short(fourh, 8)}</b></div>
             </div>
             <div class="entry-mini-story"><b>Read:</b> {_short(market, 120)}</div>
@@ -5612,7 +5726,7 @@ def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict 
     if compact:
         with st.expander("Detailed Recovery Pipeline table + charts", expanded=False):
             df = pd.DataFrame([{k: v for k, v in r.items() if k not in ["df", "rsi_series", "spring_df", "fourh_entry_df", "oneh_entry_df", "ttm_momentum_series", "squeeze_on_series"]} for r in compact])
-            keep_cols = [c for c in ["ticker", "pipeline_stage", "entry_grade", "pipeline_rank_score", "setup_quality", "entry_timing", "price", "potential_sell_price", "entry_drop_pct", "entry_drop_days", "entry_current_rsi", "daily_repair_label", "base_label", "entry_1h_label", "entry_4h_label", "analyst_verdict"] if c in df.columns]
+            keep_cols = [c for c in ["ticker", "pipeline_stage", "entry_grade", "pipeline_rank_score", "setup_quality", "entry_timing", "trend_label", "trend_type", "trend_price_vs_200_pct", "price", "potential_sell_price", "entry_drop_pct", "entry_drop_days", "entry_current_rsi", "daily_repair_label", "base_label", "entry_1h_label", "entry_4h_label", "analyst_verdict"] if c in df.columns]
             if keep_cols:
                 st.dataframe(df[keep_cols], use_container_width=True, hide_index=True)
 
