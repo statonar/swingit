@@ -5527,85 +5527,123 @@ def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict 
         st.info("🦜 The kingdom is quiet. No panic-recovery setups passed today. That can be the correct answer — patience protects the account.")
         return
 
-    early = sorted([r for r in results if str(r.get("pipeline_stage", "")).startswith("👀")], key=lambda r: float(r.get("pipeline_rank_score", r.get("entry_score", 0))), reverse=True)[:5]
-    ready = sorted([r for r in results if str(r.get("pipeline_stage", "")).startswith("⚡")], key=lambda r: float(r.get("pipeline_rank_score", r.get("entry_score", 0))), reverse=True)[:5]
+    early = sorted([r for r in results if str(r.get("pipeline_stage", "")).startswith("👀")], key=lambda r: float(r.get("pipeline_rank_score", r.get("entry_score", 0))), reverse=True)[:10]
+    ready = sorted([r for r in results if str(r.get("pipeline_stage", "")).startswith("⚡")], key=lambda r: float(r.get("pipeline_rank_score", r.get("entry_score", 0))), reverse=True)[:10]
 
-    def render_card_list(items, title, empty_msg):
+    st.markdown("""
+        <style>
+        .entry-mini-card { border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 16px; padding: 12px; min-height: 218px; background: rgba(255,255,255,0.72); box-shadow: 0 6px 18px rgba(15,23,42,0.06); margin-bottom: 12px; }
+        .entry-mini-rank { font-size: 0.72rem; letter-spacing: .05em; text-transform: uppercase; color: #64748b; margin-bottom: 2px; }
+        .entry-mini-title { font-size: 1.05rem; font-weight: 800; color: #0f172a; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .entry-mini-name { font-size: 0.72rem; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }
+        .entry-mini-pill { display: inline-block; padding: 3px 8px; border-radius: 999px; background: rgba(37,99,235,0.08); color: #1e3a8a; font-weight: 700; font-size: 0.72rem; margin-bottom: 7px; }
+        .entry-mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 8px; margin-top: 5px; }
+        .entry-mini-metric { font-size: 0.70rem; color: #475569; line-height: 1.15; }
+        .entry-mini-metric b { display: block; font-size: 0.84rem; color: #0f172a; margin-top: 1px; }
+        .entry-mini-story { font-size: 0.70rem; color: #334155; line-height: 1.25; margin-top: 8px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+        .entry-mini-next { font-size: 0.68rem; color: #64748b; line-height: 1.2; margin-top: 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        </style>
+    """, unsafe_allow_html=True)
+
+    def _short(text, n=96):
+        text = clean_label(str(text or "—"))
+        return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+    def _grade(score):
+        score = _to_float(score, 0)
+        if score >= 90:
+            return "A+"
+        if score >= 80:
+            return "A"
+        if score >= 70:
+            return "B"
+        if score >= 60:
+            return "C"
+        return "Watch"
+
+    def mini_card_html(r, i):
+        ticker = r.get("ticker", "—")
+        name = r.get("company_name") or r.get("shortName") or ticker
+        score = int(_to_float(r.get("pipeline_rank_score", r.get("entry_score", 0)), 0))
+        setup = int(_to_float(r.get("setup_quality"), 0))
+        timing = int(_to_float(r.get("entry_timing"), 0))
+        panic = int(_to_float(r.get("entry_panic_quality"), 0))
+        drop = _to_float(r.get("entry_drop_pct"), 0)
+        days = r.get("entry_drop_days") or "?"
+        rsi = _to_float(r.get("entry_current_rsi"), 0)
+        oneh = clean_label(r.get("entry_1h_label", "—"))
+        fourh = clean_label(r.get("entry_4h_label", "—"))
+        market = r.get("analyst_verdict") or r.get("event_type") or "Market read pending"
+        nxt = r.get("pipeline_what_next") or "Watch lower timeframes for confirmation."
+        return f"""
+        <div class="entry-mini-card">
+            <div class="entry-mini-rank">#{i} · {_grade(score)} · Score {score}</div>
+            <div class="entry-mini-title">{ticker}</div>
+            <div class="entry-mini-name">{_short(name, 34)}</div>
+            <div class="entry-mini-pill">{_short(r.get('pipeline_stage', 'Recovery setup'), 34)}</div>
+            <div class="entry-mini-grid">
+                <div class="entry-mini-metric">Setup<b>{setup}</b></div>
+                <div class="entry-mini-metric">Timing<b>{timing}</b></div>
+                <div class="entry-mini-metric">Panic<b>{panic}</b></div>
+                <div class="entry-mini-metric">Drop<b>{drop:.1f}% / {days}d</b></div>
+                <div class="entry-mini-metric">RSI<b>{rsi:.1f}</b></div>
+                <div class="entry-mini-metric">1H / 4H<b>{_short(oneh, 8)} · {_short(fourh, 8)}</b></div>
+            </div>
+            <div class="entry-mini-story"><b>Read:</b> {_short(market, 120)}</div>
+            <div class="entry-mini-next"><b>Next:</b> {_short(nxt, 115)}</div>
+        </div>
+        """
+
+    def render_mini_grid(items, title, empty_msg):
         st.markdown(title)
         if not items:
             st.info(empty_msg)
             return
-        for i, r in enumerate(items, start=1):
-            ticker = r.get("ticker", "—")
-            name = r.get("company_name") or r.get("shortName") or ticker
-            with st.container(border=True):
-                h1, h2, h3, h4 = st.columns([2.2, 0.8, 0.8, 0.8])
-                with h1:
-                    st.markdown(f"### #{i} {ticker} — {name}")
-                    st.markdown(f"**{r.get('entry_match_label', '🏹 Recovery Setup')}** · Score **{int(float(r.get('pipeline_rank_score', r.get('entry_score', 0))))}**")
-                    st.caption(r.get("pipeline_stage_note", ""))
-                with h2:
-                    st.metric("Setup", f"{int(_to_float(r.get('setup_quality'),0))}")
-                with h3:
-                    st.metric("Timing", f"{int(_to_float(r.get('entry_timing'),0))}")
-                with h4:
-                    st.metric("Panic", f"{int(_to_float(r.get('entry_panic_quality'),0))}")
+        for start_i in range(0, len(items), 5):
+            cols = st.columns(5)
+            for offset, r in enumerate(items[start_i:start_i + 5]):
+                with cols[offset]:
+                    st.markdown(mini_card_html(r, start_i + offset + 1), unsafe_allow_html=True)
 
-                st.markdown(f"**Why it is here:** {r.get('entry_why','—')}")
-                st.markdown(f"**What needs to happen next:** {r.get('pipeline_what_next','—')}")
-                st.caption(f"Setup age: {r.get('entry_setup_age','—')}")
-
-                c1, c2, c3, c4, c5, c6 = st.columns(6)
-                c1.metric("Panic Drop", f"{_to_float(r.get('entry_drop_pct'),0):.1f}%", f"{r.get('entry_drop_days') or '?'} days")
-                c2.metric("RSI", f"{_to_float(r.get('entry_current_rsi'),0):.1f}", f"low {_to_float(r.get('entry_rsi_low_recent'),0):.1f}")
-                c3.metric("Daily Repair", f"{int(_to_float(r.get('daily_repair_score'),0))}", clean_label(r.get('daily_repair_label','—'))[:20])
-                c4.metric("Base", f"{int(_to_float(r.get('base_score'),0))}", clean_label(r.get('base_label','—'))[:20])
-                c5.metric("1H / 4H", f"{int(_to_float(r.get('entry_1h_score'),0))}/{int(_to_float(r.get('entry_4h_score'),0))}", f"{clean_label(r.get('entry_1h_label','—'))[:8]} · {clean_label(r.get('entry_4h_label','—'))[:8]}")
-                c6.metric("EMA / MACD", f"{int(_to_float(r.get('entry_ema_score'),0))}/{int(_to_float(r.get('entry_macd_score'),0))}", f"{clean_label(r.get('entry_ema_label','—'))[:8]} · {clean_label(r.get('entry_macd_label','—'))[:8]}")
-
-                st.markdown("#### Market Read")
-                event = r.get("event_type") or "No major event detected"
-                excuse = r.get("market_excuse") or r.get("catalyst_reason") or "No clear market excuse found."
-                verdict = r.get("analyst_verdict") or "Market read unavailable"
-                note = r.get("analyst_note") or r.get("reaction_analysis") or "No deeper news note available."
-                st.markdown(f"**Event:** {event}  \n**Market's Excuse:** {excuse}  \n**Verdict:** {verdict}  \n{note}")
-
-                with st.expander("Deep recovery details", expanded=False):
-                    st.write({
-                        "Pipeline Stage": r.get("pipeline_stage"),
-                        "Setup Quality": r.get("setup_quality"),
-                        "Entry Timing": r.get("entry_timing"),
-                        "Panic Quality": r.get("entry_panic_quality"),
-                        "Daily Repair": r.get("daily_repair_reason"),
-                        "Base Formation": r.get("base_reason"),
-                        "1H Trigger": r.get("entry_1h_reason"),
-                        "4H Trigger": r.get("entry_4h_reason"),
-                        "1D Trigger": r.get("entry_1d_reason"),
-                        "MACD": r.get("entry_macd_reason"),
-                        "EMA": r.get("entry_ema_reason"),
-                        "Opportunity Remaining": r.get("opportunity_remaining_pct"),
-                        "History Events": r.get("event_count"),
-                    })
-                    fig = portfolio_chart(r.get("df"), f"{ticker} 1D", 0, r.get("potential_sell_price"))
-                    if fig:
-                        st.plotly_chart(fig, use_container_width=True)
-                    fig4 = portfolio_chart(r.get("fourh_entry_df"), f"{ticker} 4H", 0, r.get("potential_sell_price"))
-                    if fig4:
-                        st.plotly_chart(fig4, use_container_width=True)
-                    fig1h = portfolio_chart(r.get("oneh_entry_df"), f"{ticker} 1H", 0, r.get("potential_sell_price"))
-                    if fig1h:
-                        st.plotly_chart(fig1h, use_container_width=True)
-
-    render_card_list(early, "### 👀 Early Watch — developing setups", "No Early Watch names today. No wounded stocks are healing cleanly yet.")
-    render_card_list(ready, "### ⚡ Entry Hunter — ready today/tomorrow", "No ready-now entries today. Watch Early Watch for names that may graduate soon.")
+    render_mini_grid(early, "### 👀 Early Watch — developing setups", "No Early Watch names today. No wounded stocks are healing cleanly yet.")
+    render_mini_grid(ready, "### ⚡ Entry Hunter — ready today/tomorrow", "No ready-now entries today. Watch Early Watch for names that may graduate soon.")
 
     compact = early + ready
     if compact:
-        df = pd.DataFrame([{k: v for k, v in r.items() if k not in ["df", "rsi_series", "spring_df", "fourh_entry_df", "oneh_entry_df", "ttm_momentum_series", "squeeze_on_series"]} for r in compact])
-        keep_cols = [c for c in ["ticker", "pipeline_stage", "entry_grade", "pipeline_rank_score", "setup_quality", "entry_timing", "price", "potential_sell_price", "entry_drop_pct", "entry_drop_days", "entry_current_rsi", "daily_repair_label", "base_label", "entry_1h_label", "entry_4h_label", "analyst_verdict"] if c in df.columns]
-        if keep_cols:
-            st.markdown("### Compact Recovery Pipeline Table")
-            st.dataframe(df[keep_cols], use_container_width=True, hide_index=True)
+        with st.expander("Detailed Recovery Pipeline table + charts", expanded=False):
+            df = pd.DataFrame([{k: v for k, v in r.items() if k not in ["df", "rsi_series", "spring_df", "fourh_entry_df", "oneh_entry_df", "ttm_momentum_series", "squeeze_on_series"]} for r in compact])
+            keep_cols = [c for c in ["ticker", "pipeline_stage", "entry_grade", "pipeline_rank_score", "setup_quality", "entry_timing", "price", "potential_sell_price", "entry_drop_pct", "entry_drop_days", "entry_current_rsi", "daily_repair_label", "base_label", "entry_1h_label", "entry_4h_label", "analyst_verdict"] if c in df.columns]
+            if keep_cols:
+                st.dataframe(df[keep_cols], use_container_width=True, hide_index=True)
+
+            selected = st.selectbox("Open chart/details for", [r.get("ticker", "—") for r in compact], key="entry_pipeline_detail_ticker")
+            r = next((x for x in compact if x.get("ticker") == selected), None)
+            if r:
+                st.markdown(f"#### {selected} — Deep recovery details")
+                st.write({
+                    "Pipeline Stage": r.get("pipeline_stage"),
+                    "Setup Quality": r.get("setup_quality"),
+                    "Entry Timing": r.get("entry_timing"),
+                    "Panic Quality": r.get("entry_panic_quality"),
+                    "Daily Repair": r.get("daily_repair_reason"),
+                    "Base Formation": r.get("base_reason"),
+                    "1H Trigger": r.get("entry_1h_reason"),
+                    "4H Trigger": r.get("entry_4h_reason"),
+                    "1D Trigger": r.get("entry_1d_reason"),
+                    "MACD": r.get("entry_macd_reason"),
+                    "EMA": r.get("entry_ema_reason"),
+                    "Opportunity Remaining": r.get("opportunity_remaining_pct"),
+                    "History Events": r.get("event_count"),
+                })
+                fig = portfolio_chart(r.get("df"), f"{selected} 1D", 0, r.get("potential_sell_price"))
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                fig4 = portfolio_chart(r.get("fourh_entry_df"), f"{selected} 4H", 0, r.get("potential_sell_price"))
+                if fig4:
+                    st.plotly_chart(fig4, use_container_width=True)
+                fig1h = portfolio_chart(r.get("oneh_entry_df"), f"{selected} 1H", 0, r.get("potential_sell_price"))
+                if fig1h:
+                    st.plotly_chart(fig1h, use_container_width=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
