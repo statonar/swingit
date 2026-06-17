@@ -1,5 +1,5 @@
 """
-SwingIt V13.8.1 — Portfolio Position Status Cleanup
+SwingIt V14.0 — Morning Drop Afternoon Pop Workspace
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V12",
+    page_title="SwingIt V14",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -400,8 +400,8 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V13.6</div>
-            <div class="terminal-subtitle">Recovery Pipeline + Scanner + Portfolio.</div>
+            <div class="terminal-title">🔥 SwingIt V14</div>
+            <div class="terminal-subtitle">Entry Hunter + Morning Drop Pop + Scanner + Portfolio.</div>
             """,
             unsafe_allow_html=True,
         )
@@ -410,13 +410,13 @@ with st.container(border=True):
         st.markdown("<div class='toolbar-label'>Workspace</div>", unsafe_allow_html=True)
         workspace = st.selectbox(
             "Workspace",
-            ["⚡ Entry Hunter", "🔥 Scanner", "👑 My Portfolio"],
+            ["⚡ Entry Hunter", "☀️ Morning Drop Afternoon Pop", "🔥 Scanner", "👑 My Portfolio"],
             index=0,
             label_visibility="collapsed",
             key="workspace_selector",
             help="Entry Hunter finds this week\'s actionable swing entries. Scanner researches the market. Portfolio manages active swing positions and exits.",
         )
-        st.markdown("<div class='toolbar-help'>Enter, research, or manage</div>", unsafe_allow_html=True)
+        st.markdown("<div class='toolbar-help'>Enter, pop, research, or manage</div>", unsafe_allow_html=True)
 
     with top_universe_col:
         st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
@@ -512,7 +512,7 @@ with st.container(border=True):
 
     with top_run_col:
         st.markdown("<div class='toolbar-label'>&nbsp;</div>", unsafe_allow_html=True)
-        run_label = "⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else "🚀 Run Swing Scan"
+        run_label = "⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else ("☀️ Run 11AM Pop Scan" if st.session_state.get("workspace_selector") == "☀️ Morning Drop Afternoon Pop" else "🚀 Run Swing Scan")
         run = st.button(run_label, use_container_width=True, disabled=(st.session_state.get("workspace_selector") == "👑 My Portfolio"))
         st.markdown("<div class='run-note'>Use ToS for entries/exits.</div>", unsafe_allow_html=True)
 
@@ -5774,12 +5774,360 @@ def render_entry_hunter_workspace(results: list, universe_name: str, meta: dict 
                 if fig1h:
                     st.plotly_chart(fig1h, use_container_width=True)
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# V14 Morning Drop Afternoon Pop workspace
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _safe_float(x, default=0.0):
+    try:
+        if x is None or (isinstance(x, float) and math.isnan(x)):
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def _nearest_bar_value(day_df: pd.DataFrame, hour: int, minute: int, col: str = "Close"):
+    """Return the last bar at or before a target intraday time."""
+    if day_df is None or day_df.empty or col not in day_df.columns:
+        return None
+    idx = day_df.index
+    try:
+        mask = [(ts.hour < hour or (ts.hour == hour and ts.minute <= minute)) for ts in idx]
+        sub = day_df.loc[mask]
+        if sub.empty:
+            return None
+        return _safe_float(sub[col].iloc[-1], None)
+    except Exception:
+        return None
+
+
+def _intraday_days(df5: pd.DataFrame):
+    if df5 is None or df5.empty:
+        return []
+    # yfinance returns exchange-local tz-aware timestamps. Group by calendar date in that timezone.
+    return list(df5.groupby(df5.index.date))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def compute_morning_drop_candidate(ticker: str):
+    """V14 Morning Drop Afternoon Pop candidate.
+
+    Looks for strong mid/large cap stocks that are down modestly from today's open
+    around late morning and have a historical tendency to recover from similar
+    morning dips by mid-afternoon.
+    """
+    ticker = str(ticker).upper().strip()
+    if not ticker:
+        return None
+    try:
+        cap = get_market_cap_for_entry(ticker)
+        if cap and cap < 2_000_000_000:
+            return None
+    except Exception:
+        cap = 0
+
+    try:
+        tk = yf.Ticker(ticker)
+        daily = tk.history(period="1y", interval="1d", auto_adjust=False, actions=False)
+        if daily is None or daily.empty or len(daily) < 220:
+            return None
+        daily = daily.dropna(subset=["Close"])
+        close = daily["Close"].astype(float)
+        sma50 = close.rolling(50).mean()
+        sma200 = close.rolling(200).mean()
+        cur = _safe_float(close.iloc[-1], None)
+        if cur is None or math.isnan(cur):
+            return None
+        sma50_now = _safe_float(sma50.iloc[-1], None)
+        sma200_now = _safe_float(sma200.iloc[-1], None)
+        if sma50_now is None or sma200_now is None:
+            return None
+        sma50_slope = _safe_float(sma50.iloc[-1] - sma50.iloc[-10], 0)
+        sma200_slope = _safe_float(sma200.iloc[-1] - sma200.iloc[-20], 0)
+        rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
+        daily_rsi = _safe_float(rsi_series.iloc[-1], 0)
+        # Strong-trend filter. Keep this strict for V14: quality stocks only.
+        if not (cur > sma50_now and cur > sma200_now and sma50_slope > 0 and sma200_slope >= 0 and daily_rsi >= 50):
+            return None
+        trend_score = 50
+        trend_score += 15 if cur > sma50_now else 0
+        trend_score += 15 if cur > sma200_now else 0
+        trend_score += 10 if sma50_slope > 0 else 0
+        trend_score += 10 if sma200_slope > 0 else 0
+        trend_label = "🟢 Strong" if trend_score >= 85 else "🟡 Good"
+    except Exception:
+        return None
+
+    try:
+        df5 = tk.history(period="60d", interval="5m", auto_adjust=False, actions=False, prepost=False)
+        if df5 is None or df5.empty or len(df5) < 300:
+            return None
+        df5 = df5.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+        days = _intraday_days(df5)
+        if len(days) < 15:
+            return None
+        today_date, today_df = days[-1]
+        if today_df.empty or len(today_df) < 5:
+            return None
+        today_open = _safe_float(today_df["Open"].iloc[0], None)
+        current_price = _safe_float(today_df["Close"].iloc[-1], None)
+        if not today_open or not current_price:
+            return None
+        current_drop_pct = ((current_price - today_open) / today_open) * 100
+        # V14 wants normal morning weakness, not big event shock.
+        if current_drop_pct > -0.75 or current_drop_pct < -3.0:
+            return None
+
+        # VWAP for today's regular session through current bar.
+        typical = (today_df["High"].astype(float) + today_df["Low"].astype(float) + today_df["Close"].astype(float)) / 3
+        vol = today_df["Volume"].astype(float).fillna(0)
+        vwap = _safe_float((typical * vol).sum() / max(vol.sum(), 1), current_price)
+        vwap_distance_pct = ((current_price - vwap) / vwap) * 100 if vwap else 0
+
+        # RVOL approximate: current partial-day volume vs average full-day volume scaled by bars elapsed.
+        bars_elapsed = max(len(today_df), 1)
+        prior_full_vols = []
+        prior_partial_vols = []
+        for _, ddf in days[-21:-1]:
+            if ddf is not None and not ddf.empty:
+                prior_full_vols.append(_safe_float(ddf["Volume"].sum(), 0))
+                prior_partial_vols.append(_safe_float(ddf["Volume"].iloc[:bars_elapsed].sum(), 0))
+        today_vol_so_far = _safe_float(today_df["Volume"].sum(), 0)
+        avg_partial = sum(prior_partial_vols) / max(len(prior_partial_vols), 1) if prior_partial_vols else 0
+        rvol = today_vol_so_far / avg_partial if avg_partial else 1.0
+
+        # Historical behavior: previous days with similar morning drop at/near 11am.
+        matches = []
+        entry_minutes = []
+        for dte, ddf in days[:-1]:
+            if ddf is None or ddf.empty or len(ddf) < 30:
+                continue
+            open_px = _safe_float(ddf["Open"].iloc[0], None)
+            px_11 = _nearest_bar_value(ddf, 11, 0, "Close")
+            px_230 = _nearest_bar_value(ddf, 14, 30, "Close")
+            if not open_px or not px_11 or not px_230:
+                continue
+            drop11 = ((px_11 - open_px) / open_px) * 100
+            # Similar normal morning weakness bucket.
+            if -3.5 <= drop11 <= -0.75:
+                rec = ((px_230 - px_11) / px_11) * 100
+                matches.append({"date": str(dte), "drop11": drop11, "recovery": rec, "success": rec > 0})
+                # crude recovery clock: find low between 9:30 and 11:30.
+                sub = ddf.loc[[ts.hour < 11 or (ts.hour == 11 and ts.minute <= 30) for ts in ddf.index]]
+                if not sub.empty:
+                    low_ts = sub["Low"].astype(float).idxmin()
+                    entry_minutes.append(low_ts.hour * 60 + low_ts.minute)
+        sample = len(matches)
+        if sample < 3:
+            return None
+        recovery_rate = 100 * sum(1 for m in matches if m["success"]) / sample
+        avg_recovery = sum(m["recovery"] for m in matches) / sample
+        median_recovery = float(pd.Series([m["recovery"] for m in matches]).median()) if matches else 0
+        max_recovery = max([m["recovery"] for m in matches]) if matches else 0
+
+        # Recovery clock from historical low time.
+        if entry_minutes:
+            avg_min = int(sum(entry_minutes) / len(entry_minutes))
+            best_entry = f"{avg_min//60}:{avg_min%60:02d}"
+        else:
+            best_entry = "10:45–11:15"
+
+        # Component scores.
+        recovery_score = min(max(recovery_rate, 0), 100)
+        sample_score = min(sample / 20 * 100, 100)
+        # Sweet spot: current drop around -1.25% to -2.25%.
+        drop_abs = abs(current_drop_pct)
+        if 1.0 <= drop_abs <= 2.25:
+            weakness_score = 100
+        elif 0.75 <= drop_abs < 1.0:
+            weakness_score = 75
+        elif 2.25 < drop_abs <= 3.0:
+            weakness_score = 70
+        else:
+            weakness_score = 40
+        # VWAP score: slightly below VWAP is ideal; far below is danger; above VWAP means pop may have begun.
+        if -1.0 <= vwap_distance_pct <= -0.05:
+            vwap_score = 100
+            vwap_label = "🟢 Just below VWAP"
+        elif -2.0 <= vwap_distance_pct < -1.0:
+            vwap_score = 70
+            vwap_label = "🟡 Below VWAP"
+        elif vwap_distance_pct > 0:
+            vwap_score = 65
+            vwap_label = "🟢 Above VWAP"
+        else:
+            vwap_score = 40
+            vwap_label = "🔴 Far below VWAP"
+        rvol_score = min(max((rvol - 0.8) / 1.2 * 100, 0), 100)
+        bounce_probability = (
+            recovery_score * 0.35 +
+            trend_score * 0.25 +
+            weakness_score * 0.15 +
+            vwap_score * 0.15 +
+            rvol_score * 0.10
+        )
+        if sample >= 15 and recovery_rate >= 65:
+            confidence = "High"
+        elif sample >= 8 and recovery_rate >= 55:
+            confidence = "Medium"
+        else:
+            confidence = "Low"
+        expected_exit = "2:15–3:00"
+        return {
+            "ticker": ticker,
+            "current_price": current_price,
+            "today_open": today_open,
+            "current_drop_pct": current_drop_pct,
+            "trend_score": round(trend_score, 1),
+            "trend_label": trend_label,
+            "daily_rsi": round(daily_rsi, 1),
+            "recovery_rate": round(recovery_rate, 1),
+            "avg_recovery": round(avg_recovery, 2),
+            "median_recovery": round(median_recovery, 2),
+            "max_recovery": round(max_recovery, 2),
+            "sample_size": sample,
+            "vwap": round(vwap, 2),
+            "vwap_distance_pct": round(vwap_distance_pct, 2),
+            "vwap_label": vwap_label,
+            "rvol": round(rvol, 2),
+            "bounce_probability": round(bounce_probability, 1),
+            "confidence": confidence,
+            "best_entry": best_entry,
+            "expected_exit": expected_exit,
+            "reason": f"Historically recovered {recovery_rate:.0f}% of similar late-morning dips with avg {avg_recovery:+.2f}% recovery from 11:00 to 2:30. Current drop is {current_drop_pct:.2f}% from open.",
+        }
+    except Exception:
+        return None
+
+
+def _mdap_card(rank: int, r: dict) -> str:
+    ticker = html.escape(str(r.get("ticker", "—")))
+    prob = _safe_float(r.get("bounce_probability"), 0)
+    conf = html.escape(str(r.get("confidence", "—")))
+    return f"""
+    <div class='entry-mini-card'>
+      <div class='entry-mini-rank'>#{rank}</div>
+      <div class='entry-mini-title'>{ticker}</div>
+      <div class='entry-mini-sub'>☀️ Bounce Prob: <b>{prob:.0f}</b> · {conf}</div>
+      <div class='entry-mini-line'>Drop: <b>{_safe_float(r.get('current_drop_pct')):.2f}%</b></div>
+      <div class='entry-mini-line'>Recovery: <b>{_safe_float(r.get('recovery_rate')):.0f}%</b> · Avg <b>{_safe_float(r.get('avg_recovery')):+.2f}%</b></div>
+      <div class='entry-mini-line'>Events: <b>{int(_safe_float(r.get('sample_size'),0))}</b> · RVOL <b>{_safe_float(r.get('rvol'),1):.1f}x</b></div>
+      <div class='entry-mini-line'>VWAP: <b>{html.escape(str(r.get('vwap_label','—')))}</b></div>
+      <div class='entry-mini-line'>Entry: <b>{html.escape(str(r.get('best_entry','10:45–11:15')))}</b> · Exit: <b>{html.escape(str(r.get('expected_exit','2:15–3:00')))}</b></div>
+    </div>
+    """
+
+
+def render_morning_drop_workspace(results: list, universe_name: str, meta: dict | None = None):
+    st.markdown("## ☀️ Morning Drop Afternoon Pop")
+    st.caption("Built for the 10:45–11:15 AM window: strong-trend stocks temporarily down from open with a history of afternoon recovery.")
+    if meta:
+        st.markdown(
+            f"<div class='small-muted'>Scan: {html.escape(str(meta.get('universe', universe_name)))} · {int(meta.get('tickers_scanned', 0)):,} tickers · {html.escape(str(meta.get('run_date','')))}</div>",
+            unsafe_allow_html=True,
+        )
+    if not results:
+        with st.container(border=True):
+            st.markdown("### 🦜 No morning-pop candidates right now")
+            st.write("That can be correct. This workspace only wants strong stocks down modestly this morning with enough historical 11AM → 2:30PM recovery behavior.")
+        return
+    top = sorted(results, key=lambda r: float(r.get("bounce_probability", 0)), reverse=True)[:10]
+    st.markdown("### 🎯 Best Bounce Candidates")
+    for start in range(0, len(top), 5):
+        cols = st.columns(5)
+        for i, r in enumerate(top[start:start+5]):
+            with cols[i]:
+                st.markdown(_mdap_card(start+i+1, r), unsafe_allow_html=True)
+    with st.expander("📊 Full Morning Drop Afternoon Pop table", expanded=False):
+        display = pd.DataFrame(top)
+        wanted = ["ticker", "bounce_probability", "confidence", "current_drop_pct", "recovery_rate", "avg_recovery", "median_recovery", "sample_size", "trend_label", "daily_rsi", "vwap_distance_pct", "vwap_label", "rvol", "best_entry", "expected_exit", "reason"]
+        st.dataframe(display[[c for c in wanted if c in display.columns]], use_container_width=True, hide_index=True)
+    selected = st.selectbox("Open deeper read", [r.get("ticker") for r in top], key="mdap_detail_ticker")
+    if selected:
+        r = next((x for x in top if x.get("ticker") == selected), None)
+        if r:
+            with st.container(border=True):
+                st.markdown(f"### ☀️ {selected} intraday bounce read")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Bounce probability", f"{_safe_float(r.get('bounce_probability')):.0f}")
+                c2.metric("Recovery rate", f"{_safe_float(r.get('recovery_rate')):.0f}%")
+                c3.metric("Avg recovery", f"{_safe_float(r.get('avg_recovery')):+.2f}%")
+                c4.metric("Current drop", f"{_safe_float(r.get('current_drop_pct')):.2f}%")
+                st.write(r.get("reason", ""))
+                st.caption(f"VWAP: {r.get('vwap_label')} ({_safe_float(r.get('vwap_distance_pct')):.2f}%). Best historical entry area: {r.get('best_entry')}. Expected exit window: {r.get('expected_exit')}.")
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
 # Portfolio workspace short-circuits the scanner UI.
 if st.session_state.get("workspace_selector") == "👑 My Portfolio":
     render_portfolio_command_center()
+    st.stop()
+
+
+# Morning Drop Afternoon Pop workspace short-circuits the broad research scanner UI.
+if st.session_state.get("workspace_selector") == "☀️ Morning Drop Afternoon Pop":
+    if "mdap_results" not in st.session_state:
+        st.session_state.mdap_results = None
+    if "mdap_meta" not in st.session_state:
+        st.session_state.mdap_meta = None
+
+    if not run and st.session_state.mdap_results is None:
+        with st.container(border=True):
+            st.markdown("## ☀️ Morning Drop Afternoon Pop")
+            st.markdown(
+                "Run this around **10:45–11:15 AM market time**. It looks for strong large/mega-cap stocks that are temporarily down from the open and historically rebound from similar late-morning dips."
+            )
+            st.caption("This first version includes the full V14 idea: historical recovery rate, average recovery, sample size, VWAP distance, RVOL, confidence, and entry/exit windows.")
+        st.stop()
+
+    if run:
+        universe_text = custom_input
+        if universe == "📂 CSV upload":
+            uploaded_tickers = parse_uploaded_tickers(csv_uploaded)
+            universe_text = ",".join(uploaded_tickers)
+        all_tickers, source_map = get_universe_payload(universe, universe_text)
+        if not all_tickers:
+            st.warning("No tickers found. Check your custom list or choose another universe.")
+            st.stop()
+        st.info(f"☀️ Morning Drop Afternoon Pop scanning {len(all_tickers):,} tickers from {universe}…")
+        progress = st.progress(0)
+        status = st.empty()
+        leaders_box = st.empty()
+        results = []
+        completed = 0
+        with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
+            future_map = {
+                executor.submit(compute_morning_drop_candidate, ticker): ticker
+                for ticker in all_tickers
+            }
+            for future in as_completed(future_map):
+                ticker = future_map[future]
+                completed += 1
+                try:
+                    candidate = future.result()
+                except Exception:
+                    candidate = None
+                if candidate:
+                    results.append(candidate)
+                progress.progress(min(completed / max(len(all_tickers), 1), 1.0))
+                status.caption(f"Morning Pop · scanned {completed:,} / {len(all_tickers):,} · latest: {ticker} · candidates: {len(results):,}")
+                if results and (completed % 50 == 0 or completed == len(all_tickers)):
+                    preview = sorted(results, key=lambda r: float(r.get('bounce_probability', 0)), reverse=True)[:5]
+                    leaders_box.info("Live Pop leaders: " + " · ".join([f"{r.get('ticker')} {r.get('bounce_probability')}" for r in preview]))
+        progress.empty(); status.empty(); leaders_box.empty()
+        st.session_state.mdap_results = sorted(results, key=lambda r: float(r.get("bounce_probability", 0)), reverse=True)
+        st.session_state.mdap_meta = {
+            "universe": universe,
+            "tickers_scanned": len(all_tickers),
+            "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
+        }
+
+    meta_m = st.session_state.mdap_meta or {"universe": universe, "tickers_scanned": 0, "run_date": "current session"}
+    render_morning_drop_workspace(st.session_state.mdap_results or [], meta_m.get("universe", universe), meta_m)
     st.stop()
 
 
