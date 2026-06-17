@@ -1,5 +1,5 @@
 """
-SwingIt V12.5 — My Portfolio Command Center + Thesis Monitor
+SwingIt V13.8.1 — Portfolio Position Status Cleanup
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -4141,7 +4141,7 @@ def mini_chart(data):
 # V12 Portfolio Command Center helpers
 # ──────────────────────────────────────────────────────────────────────────────
 PORTFOLIO_CSV_FILE = "portfolio.csv"
-PORTFOLIO_COLUMNS = ["Ticker", "Entry Price", "Entry Date", "Shares", "Profit Goal %", "Entry Thesis"]
+PORTFOLIO_COLUMNS = ["Ticker", "Entry Price", "Entry Date", "Shares", "Profit Goal %"]
 
 
 def portfolio_to_csv_text(rows: list[dict]) -> str:
@@ -4170,7 +4170,6 @@ def load_portfolio() -> list[dict]:
                     "Entry Date": str(r.get("Entry Date", ""))[:10],
                     "Shares": float(r.get("Shares", 0) or 0),
                     "Profit Goal %": float(r.get("Profit Goal %", 8) or 8),
-                    "Entry Thesis": str(r.get("Entry Thesis", r.get("Thesis", "")) or ""),
                 })
     except Exception:
         rows = []
@@ -4204,7 +4203,6 @@ def save_portfolio(rows: list[dict]) -> None:
             "Entry Date": str(r.get("Entry Date", ""))[:10],
             "Shares": shares,
             "Profit Goal %": goal,
-            "Entry Thesis": str(r.get("Entry Thesis", r.get("Thesis", "")) or ""),
         })
     st.session_state["portfolio_rows_single_user"] = clean
     try:
@@ -4237,7 +4235,6 @@ def load_portfolio_from_upload(uploaded_file) -> list[dict]:
                 "Entry Date": str(r.get("Entry Date", r.get("Date", "")))[:10],
                 "Shares": float(r.get("Shares", 0) or 0),
                 "Profit Goal %": float(r.get("Profit Goal %", r.get("Goal", 8)) or 8),
-                "Entry Thesis": str(r.get("Entry Thesis", r.get("Thesis", "")) or ""),
             })
         return rows
     except Exception:
@@ -4530,6 +4527,23 @@ def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: 
         f"1H is {clean_label(oneh.get('spring',{}).get('spring_label','—'))}."
     )
 
+    if progress >= 100 or opp_remaining <= 15:
+        position_status = "EXIT ZONE"
+        position_class = "decision-red"
+        position_note = "The planned move is essentially complete. Focus on protecting profit and watching the 1H/4H exit signals."
+    elif progress >= 70 or opp_remaining <= 35:
+        position_status = "LATE"
+        position_class = "decision-yellow"
+        position_note = "The trade is working, but the easy part may be getting closer to done. Monitor for 1H momentum fading or 4H rollover."
+    elif progress >= 30:
+        position_status = "MIDDLE"
+        position_class = "decision-blue"
+        position_note = "The trade is in progress. Momentum and market reaction matter more than the original entry story right now."
+    else:
+        position_status = "EARLY"
+        position_class = "decision-green"
+        position_note = "The trade is still early relative to your goal. Let the setup develop unless the chart or news clearly breaks."
+
     return {
         "verdict": verdict,
         "klass": klass,
@@ -4542,6 +4556,9 @@ def portfolio_exit_analysis(candidate: dict, position: dict, fourh: dict, oneh: 
         "oneh_note": oneh_note,
         "exit_assistant_active": exit_assistant_active,
         "trade_story": trade_story,
+        "position_status": position_status,
+        "position_class": position_class,
+        "position_note": position_note,
         "thesis_info": thesis_info,
     }
 
@@ -4685,7 +4702,7 @@ def compute_portfolio_deep(ticker: str, entry_price: float, entry_date: str, goa
 
 def render_portfolio_command_center():
     st.markdown("## 👑 My Portfolio Command Center")
-    st.caption("Manage active swing positions. Scanner finds entries; Portfolio tracks Trade Health, Thesis Health, Market Vote, and exit timing.")
+    st.caption("Manage active swing positions. Scanner finds entries; Portfolio tracks position status, trade health, market/news read, and exit timing.")
 
     rows = load_portfolio()
     with st.container(border=True):
@@ -4704,7 +4721,6 @@ def render_portfolio_command_center():
                 "Entry Date": st.column_config.TextColumn(help="YYYY-MM-DD"),
                 "Shares": st.column_config.NumberColumn(format="%.4f", min_value=0.0),
                 "Profit Goal %": st.column_config.NumberColumn(format="%.1f%%", min_value=1.0, max_value=100.0),
-                "Entry Thesis": st.column_config.TextColumn(help="Why you entered this trade. Example: Earnings overreaction; market likely too pessimistic."),
             },
             key="portfolio_editor",
         )
@@ -4734,7 +4750,7 @@ def render_portfolio_command_center():
         if not ticker:
             continue
         with st.spinner(f"Deep-diving {ticker}…"):
-            data = compute_portfolio_deep(ticker, float(pos.get("Entry Price", 0) or 0), str(pos.get("Entry Date", "")), float(pos.get("Profit Goal %", 8) or 8), str(pos.get("Entry Thesis", "") or ""))
+            data = compute_portfolio_deep(ticker, float(pos.get("Entry Price", 0) or 0), str(pos.get("Entry Date", "")), float(pos.get("Profit Goal %", 8) or 8))
         if not data:
             st.warning(f"Could not analyze {ticker}.")
             continue
@@ -4751,18 +4767,17 @@ def render_portfolio_command_center():
             st.markdown(f"<span class='decision-pill {analysis['klass']}'>{analysis['verdict']} · Confidence {analysis['confidence']}</span>", unsafe_allow_html=True)
             if fallback_used:
                 st.caption("Using lightweight portfolio analysis for this ticker because the full scanner read was unavailable.")
-            st.markdown(f"<div class='read-box'><div class='read-title'>🧠 Trade Story</div><div class='read-text'>{html.escape(analysis['trade_story'])}</div></div>", unsafe_allow_html=True)
-            thesis = analysis.get("thesis_info", {})
             st.markdown(
                 f"<div class='read-box'>"
-                f"<div class='read-title'>🧾 Entry Thesis</div>"
-                f"<div class='read-text'>{html.escape(str(thesis.get('entry_thesis','No entry thesis provided yet.')))}</div>"
+                f"<div class='read-title'>🎯 Position Status: <span class='decision-pill {html.escape(str(analysis.get('position_class','decision-blue')))}'>{html.escape(str(analysis.get('position_status','—')))}</span></div>"
+                f"<div class='read-text'>{html.escape(str(analysis.get('position_note','')))}</div>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
+            thesis = analysis.get("thesis_info", {})
             st.markdown(
                 f"<div class='read-box'>"
-                f"<div class='read-title'>🧠 Thesis Health: <span class='decision-pill {html.escape(str(thesis.get('thesis_class','decision-blue')))}'>{html.escape(str(thesis.get('thesis_health','—')))} · {html.escape(str(thesis.get('thesis_severity','')))}</span></div>"
+                f"<div class='read-title'>🧠 Market + News Read: <span class='decision-pill {html.escape(str(thesis.get('thesis_class','decision-blue')))}'>{html.escape(str(thesis.get('thesis_health','—')))} · {html.escape(str(thesis.get('thesis_severity','')))}</span></div>"
                 f"<div class='read-text'>{html.escape(str(thesis.get('thesis_summary','')))}</div>"
                 f"</div>",
                 unsafe_allow_html=True,
