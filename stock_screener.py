@@ -6089,6 +6089,25 @@ def _cc_news_tag(row):
     return label[:34]
 
 
+
+
+def _cc_ttm_state(label: str) -> str:
+    """Simplified TTM language for Command Center filters.
+
+    Loading = squeeze is on / volatility compressing.
+    Recovering = selling pressure is fading; negative momentum is improving.
+    Firing Up = released/positive momentum expanding.
+    Neutral = no clean actionable TTM state.
+    """
+    text = str(label or "").lower()
+    if "fired up" in text or ("positive" in text and "rising" in text):
+        return "🟢 Firing Up"
+    if "early turn" in text or "recover" in text or "improving" in text or "loaded & improving" in text:
+        return "🔵 Recovering"
+    if "squeeze on" in text or "loaded" in text or "loading" in text:
+        return "🔴 Loading"
+    return "⚪ Neutral"
+
 def command_center_row(c: dict, source_map: dict | None = None):
     ticker = c.get("ticker", "—")
     src = ", ".join((source_map or {}).get(ticker, [])) if source_map else ""
@@ -6152,8 +6171,10 @@ def command_center_row(c: dict, source_map: dict | None = None):
         "Panic %": round(panic, 1) if panic else None,
         "Opportunity Left": c.get("opportunity_remaining_pct"),
         "News": _cc_news_tag(c),
-        "TTM": clean_label(c.get("spring_label", "—"))[:28],
-        "4H": clean_label(c.get("trigger_4h_label", "—"))[:28],
+        "TTM": _cc_ttm_state(c.get("spring_label", "—")),
+        "4H": _cc_ttm_state(c.get("trigger_4h_label", "—")),
+        "TTM Detail": clean_label(c.get("spring_label", "—"))[:28],
+        "4H Detail": clean_label(c.get("trigger_4h_label", "—"))[:28],
         "Trend": clean_label(c.get("trend_label", "—"))[:24] if c.get("trend_label") else "—",
         "Why It's Here": " · ".join(why_bits)[:88],
         "Sources": src,
@@ -6163,7 +6184,7 @@ def command_center_row(c: dict, source_map: dict | None = None):
 
 def render_command_center(results: list, universe_name: str, source_map: dict | None = None, meta: dict | None = None):
     st.markdown("## ⭐ Command Center")
-    st.caption("Clean discovery view: scan once, filter fast, sort by what matters, then open charts only when something earns attention.")
+    st.caption("Clean discovery view: scan once, filter fast, sort by what matters. TTM is simplified to Recovering, Firing Up, Loading, or Neutral.")
 
     if meta:
         st.markdown(
@@ -6194,7 +6215,7 @@ def render_command_center(results: list, universe_name: str, source_map: dict | 
         with f3:
             news_filter = st.selectbox("News", ["Any", "Has news", "Positive-ish", "No news"], key="cc_news")
         with f4:
-            ttm_filter = st.selectbox("TTM", ["Any", "Improving", "4H improving", "Fired/Turn"], key="cc_ttm")
+            ttm_filter = st.selectbox("TTM", ["Any", "Recovering ⭐", "Firing Up", "Loading", "Neutral"], key="cc_ttm")
         with f5:
             sort_by = st.selectbox("Sort", ["Amber Fit", "% Today", "Overreaction", "Setup", "Panic %", "RSI"], key="cc_sort")
         with f6:
@@ -6229,12 +6250,19 @@ def render_command_center(results: list, universe_name: str, source_map: dict | 
     elif news_filter == "Positive-ish":
         view = view[view["News"].astype(str).str.lower().str.contains("positive|fresh|strong|event|bull|beat", na=False)]
 
-    if ttm_filter == "Improving":
-        view = view[view["TTM"].astype(str).str.lower().str.contains("improv|turn|fired|building|recover", na=False)]
-    elif ttm_filter == "4H improving":
-        view = view[view["4H"].astype(str).str.lower().str.contains("improv|turn|fired|building|recover", na=False)]
-    elif ttm_filter == "Fired/Turn":
-        mask = view["TTM"].astype(str).str.lower().str.contains("fired|turn", na=False) | view["4H"].astype(str).str.lower().str.contains("fired|turn", na=False)
+    # Simplified V15.1 TTM filter states.
+    # "Recovering" is Amber's key rebound state: negative momentum improving / early turn.
+    if ttm_filter == "Recovering ⭐":
+        mask = view["TTM"].astype(str).str.contains("Recovering", na=False) | view["4H"].astype(str).str.contains("Recovering", na=False)
+        view = view[mask]
+    elif ttm_filter == "Firing Up":
+        mask = view["TTM"].astype(str).str.contains("Firing Up", na=False) | view["4H"].astype(str).str.contains("Firing Up", na=False)
+        view = view[mask]
+    elif ttm_filter == "Loading":
+        mask = view["TTM"].astype(str).str.contains("Loading", na=False) | view["4H"].astype(str).str.contains("Loading", na=False)
+        view = view[mask]
+    elif ttm_filter == "Neutral":
+        mask = view["TTM"].astype(str).str.contains("Neutral", na=False) & view["4H"].astype(str).str.contains("Neutral", na=False)
         view = view[mask]
 
     view = view[pd.to_numeric(view["Amber Fit"], errors="coerce").fillna(0) >= min_fit]
