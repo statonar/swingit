@@ -1,5 +1,5 @@
 """
-SwingIt V15.0 — Command Center Workspace
+SwingIt V15.2.0 — Command Center Workspace
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V15",
+    page_title="SwingIt V15.2",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -400,7 +400,7 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V15</div>
+            <div class="terminal-title">🔥 SwingIt V15.2</div>
             <div class="terminal-subtitle">Simple Command Center + specialist workspaces.</div>
             """,
             unsafe_allow_html=True,
@@ -2883,6 +2883,9 @@ def compute_prescreen_candidate(ticker: str, profit_target: int, bounce_days: in
         close = df["Close"].astype(float)
         volume = df["Volume"].astype(float)
         current_price = float(close.iloc[-1])
+        today_change_pct = None
+        if len(close) >= 2 and float(close.iloc[-2]) != 0:
+            today_change_pct = (current_price / float(close.iloc[-2]) - 1.0) * 100.0
         rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
         current_rsi = float(rsi_series.dropna().iloc[-1]) if not rsi_series.dropna().empty else None
         if current_rsi is None:
@@ -2931,17 +2934,51 @@ def compute_prescreen_candidate(ticker: str, profit_target: int, bounce_days: in
             0.02 * volume_trend_score
         )))
 
+        # Extra lightweight fields make Command Center useful without requiring
+        # a full hourly/news deep read on every ticker.
+        try:
+            daily_spring = compute_ttm_spring(df)
+        except Exception:
+            daily_spring = {"spring_score": 0, "spring_label": "⚪ Neutral"}
+        try:
+            trend = trend_health_state(df)
+        except Exception:
+            trend = {"trend_score": 0, "trend_label": "⚪ Trend unavailable"}
+
+        setup_quality_fast = int(round(clamp(
+            0.32 * rebound_stage_score +
+            0.22 * opp_remaining.get("opportunity_remaining_score", 0) +
+            0.18 * daily_spring.get("spring_score", 0) +
+            0.16 * panic.get("panic_shock_score", 0) +
+            0.12 * trend.get("trend_score", 0)
+        )))
+
         return {
             "ticker": ticker,
             "fast_score": fast_score,
             "price": round(current_price, 2),
+            "today_change_pct": round(today_change_pct, 2) if today_change_pct is not None else None,
             "current_rsi": round(current_rsi, 1),
             "history_score": history_score,
             "rebound_stage_score": int(round(rebound_stage_score)),
             "rebound_stage_label": rebound_stage_label,
+            "setup_quality": setup_quality_fast,
+            "spring_score": daily_spring.get("spring_score", 0),
+            "spring_label": daily_spring.get("spring_label", "⚪ Neutral"),
+            "trigger_4h_score": 0,
+            "trigger_4h_label": "⚪ Not deep-scanned",
+            "trend_score": trend.get("trend_score", 0),
+            "trend_label": trend.get("trend_label", "⚪ Trend unavailable"),
             "opportunity_remaining_score": opp_remaining.get("opportunity_remaining_score", 0),
+            "opportunity_remaining_pct": opp_remaining.get("opportunity_remaining_pct"),
             "panic_shock_score": panic.get("panic_shock_score", 0),
+            "panic_drop_pct": panic.get("panic_drop_pct"),
+            "overreaction_score": int(round(clamp(0.55 * panic.get("panic_shock_score", 0) + 0.25 * history_score + 0.20 * opp_remaining.get("opportunity_remaining_score", 0)))),
+            "catalyst_score": 0,
+            "stabilization_score": rebound_stage_score,
+            "attention_score": attention_score,
             "volume_ratio": round(float(volume_ratio), 2) if volume_ratio is not None else None,
+            "opportunity": "fast pre-screen",
         }
     except Exception:
         return None
@@ -6026,7 +6063,7 @@ def render_morning_drop_workspace(results: list, universe_name: str, meta: dict 
     st.caption("Built for the 10:45–11:15 AM window: strong-trend stocks temporarily down from open with a history of afternoon recovery.")
     if meta:
         st.markdown(
-            f"<div class='small-muted'>Scan: {html.escape(str(meta.get('universe', universe_name)))} · {int(meta.get('tickers_scanned', 0)):,} tickers · {html.escape(str(meta.get('run_date','')))}</div>",
+            f"<div class='small-muted'>Scan: {html.escape(str(meta.get('universe', universe_name)))} · {int(meta.get('tickers_scanned', 0)):,} tickers" + (f" · {int(meta.get('deep_analyzed', 0)):,} deep" if meta.get('deep_analyzed') is not None else "") + f" · {html.escape(str(meta.get('run_date','')))}</div>",
             unsafe_allow_html=True,
         )
     if not results:
@@ -6113,13 +6150,13 @@ def command_center_row(c: dict, source_map: dict | None = None):
     src = ", ".join((source_map or {}).get(ticker, [])) if source_map else ""
     rsi = _safe_float(c.get("current_rsi"), None)
     panic = _safe_float(c.get("panic_drop_pct"), 0) or 0
-    today_chg = None
+    today_chg = _safe_float(c.get("today_change_pct"), None)
     try:
         df = c.get("df")
         if df is not None and not df.empty and len(df) >= 2:
             today_chg = ((float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-2])) - 1) * 100
     except Exception:
-        today_chg = None
+        pass
 
     # Amber Fit: blend the exact things she keeps manually checking.
     amber_fit = clamp(
@@ -6336,34 +6373,75 @@ if st.session_state.get("workspace_selector") == "⭐ Command Center":
         progress = st.progress(0)
         status = st.empty()
         leaders_box = st.empty()
-        results = []
+        # V15.2 Speed Boost:
+        # Command Center is a discovery page, so it now does a fast daily-only pass
+        # across the full universe and deep-analyzes only the top candidates. This
+        # keeps the Finviz-style experience quick while preserving deep SwingIt
+        # intelligence on the names most likely to matter.
+        prescreen = []
         completed = 0
-        # Command Center uses the core SwingIt read so all prior intelligence flows into one clean table.
         with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
             future_map = {
-                executor.submit(compute_candidate, ticker, profit_target, bounce_window, include_news, spring_timeframe): ticker
+                executor.submit(compute_prescreen_candidate, ticker, profit_target, bounce_window): ticker
                 for ticker in all_tickers
             }
             for future in as_completed(future_map):
                 ticker = future_map[future]
                 completed += 1
                 try:
-                    candidate = future.result()
+                    fast = future.result()
                 except Exception:
-                    candidate = None
-                if candidate:
-                    results.append(candidate)
-                progress.progress(min(completed / max(len(all_tickers), 1), 1.0))
-                status.caption(f"Command Center · scanned {completed:,} / {len(all_tickers):,} · latest: {ticker} · usable: {len(results):,}")
-                if results and (completed % 50 == 0 or completed == len(all_tickers)):
-                    preview = sorted(results, key=lambda r: float(command_center_row(r).get('Amber Fit', 0)), reverse=True)[:5]
-                    leaders_box.info("Live Command leaders: " + " · ".join([f"{r.get('ticker')} {int(command_center_row(r).get('Amber Fit', 0))}" for r in preview]))
+                    fast = None
+                if fast:
+                    prescreen.append(fast)
+                progress.progress(min((completed / max(len(all_tickers), 1)) * 0.55, 0.55))
+                status.caption(f"Command Center · Fast pass {completed:,} / {len(all_tickers):,} · latest: {ticker} · candidates: {len(prescreen):,}")
+                if prescreen and (completed % 100 == 0 or completed == len(all_tickers)):
+                    preview = sorted(prescreen, key=lambda r: float(r.get('fast_score', 0)), reverse=True)[:5]
+                    leaders_box.info("Fast leaders: " + " · ".join([f"{r.get('ticker')} {int(r.get('fast_score', 0))}" for r in preview]))
+
+        prescreen_sorted = sorted(prescreen, key=lambda r: float(r.get("fast_score", 0)), reverse=True)
+        deep_n = min(int(deep_scan_top_n), len(prescreen_sorted))
+        deep_tickers = [r.get("ticker") for r in prescreen_sorted[:deep_n] if r.get("ticker")]
+
+        deep_results = []
+        completed = 0
+        if deep_tickers:
+            leaders_box.info(f"Deep pass: adding 4H/news/full analysis to top {len(deep_tickers):,} names…")
+            with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
+                future_map = {
+                    executor.submit(compute_candidate, ticker, profit_target, bounce_window, include_news, spring_timeframe): ticker
+                    for ticker in deep_tickers
+                }
+                for future in as_completed(future_map):
+                    ticker = future_map[future]
+                    completed += 1
+                    try:
+                        candidate = future.result()
+                    except Exception:
+                        candidate = None
+                    if candidate:
+                        deep_results.append(candidate)
+                    progress.progress(min(0.55 + (completed / max(len(deep_tickers), 1)) * 0.45, 1.0))
+                    status.caption(f"Command Center · Deep pass {completed:,} / {len(deep_tickers):,} · latest: {ticker} · deep usable: {len(deep_results):,}")
+
+        # Keep enough fast rows for filtering, but prefer deep rows when available.
+        deep_by_ticker = {r.get("ticker"): r for r in deep_results if r.get("ticker")}
+        combined = list(deep_by_ticker.values())
+        for r in prescreen_sorted:
+            t = r.get("ticker")
+            if t and t not in deep_by_ticker:
+                combined.append(r)
+            if len(combined) >= 500:
+                break
+
         progress.empty(); status.empty(); leaders_box.empty()
-        st.session_state.command_center_results = sorted(results, key=lambda r: float(command_center_row(r).get("Amber Fit", 0)), reverse=True)
+        st.session_state.command_center_results = sorted(combined, key=lambda r: float(command_center_row(r).get("Amber Fit", 0)), reverse=True)
         st.session_state.command_center_sources = source_map
         st.session_state.command_center_meta = {
             "universe": universe,
             "tickers_scanned": len(all_tickers),
+            "deep_analyzed": len(deep_results),
             "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
         }
 
@@ -6473,12 +6551,39 @@ if st.session_state.get("workspace_selector") == "⚡ Entry Hunter":
         progress = st.progress(0)
         status = st.empty()
         leaders_box = st.empty()
-        results = []
+        # V15.2 Speed Boost for Entry Hunter:
+        # First run the cheap daily pre-screen, then spend 1H/4H/news work only
+        # on the strongest candidates. This avoids 3,000 expensive intraday reads.
+        prescreen = []
         completed = 0
         with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
             future_map = {
-                executor.submit(compute_entry_hunter_candidate, ticker, profit_target, bounce_window, include_news): ticker
+                executor.submit(compute_prescreen_candidate, ticker, profit_target, bounce_window): ticker
                 for ticker in all_tickers
+            }
+            for future in as_completed(future_map):
+                ticker = future_map[future]
+                completed += 1
+                try:
+                    fast = future.result()
+                except Exception:
+                    fast = None
+                if fast:
+                    prescreen.append(fast)
+                progress.progress(min((completed / max(len(all_tickers), 1)) * 0.50, 0.50))
+                status.caption(f"Entry Hunter · Fast pass {completed:,} / {len(all_tickers):,} · latest: {ticker} · candidates: {len(prescreen):,}")
+
+        prescreen_sorted = sorted(prescreen, key=lambda r: float(r.get("fast_score", 0)), reverse=True)
+        deep_n = min(max(int(deep_scan_top_n), 100), len(prescreen_sorted))
+        deep_tickers = [r.get("ticker") for r in prescreen_sorted[:deep_n] if r.get("ticker")]
+
+        results = []
+        completed = 0
+        leaders_box.info(f"Deep pass: Recovery Pipeline on top {len(deep_tickers):,} fast candidates…")
+        with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
+            future_map = {
+                executor.submit(compute_entry_hunter_candidate, ticker, profit_target, bounce_window, include_news): ticker
+                for ticker in deep_tickers
             }
             for future in as_completed(future_map):
                 ticker = future_map[future]
@@ -6489,9 +6594,9 @@ if st.session_state.get("workspace_selector") == "⚡ Entry Hunter":
                     candidate = None
                 if candidate:
                     results.append(candidate)
-                progress.progress(min(completed / max(len(all_tickers), 1), 1.0))
-                status.caption(f"Entry Hunter · scanned {completed:,} / {len(all_tickers):,} · latest: {ticker} · pipeline names: {len(results):,}")
-                if results and (completed % 50 == 0 or completed == len(all_tickers)):
+                progress.progress(min(0.50 + (completed / max(len(deep_tickers), 1)) * 0.50, 1.0))
+                status.caption(f"Entry Hunter · Deep pass {completed:,} / {len(deep_tickers):,} · latest: {ticker} · pipeline names: {len(results):,}")
+                if results and (completed % 25 == 0 or completed == len(deep_tickers)):
                     preview = sorted(results, key=lambda r: float(r.get('pipeline_rank_score', r.get('entry_score', 0))), reverse=True)[:5]
                     leaders_box.info("Live Recovery Pipeline leaders: " + " · ".join([f"{r.get('ticker')} {r.get('entry_grade')} {r.get('entry_score')}" for r in preview]))
         progress.empty(); status.empty(); leaders_box.empty()
