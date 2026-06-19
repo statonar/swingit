@@ -1,5 +1,5 @@
 """
-SwingIt V14.0 — Morning Drop Afternoon Pop Workspace
+SwingIt V15.0 — Command Center Workspace
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V14",
+    page_title="SwingIt V15",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -400,8 +400,8 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V14</div>
-            <div class="terminal-subtitle">Entry Hunter + Morning Drop Pop + Scanner + Portfolio.</div>
+            <div class="terminal-title">🔥 SwingIt V15</div>
+            <div class="terminal-subtitle">Simple Command Center + specialist workspaces.</div>
             """,
             unsafe_allow_html=True,
         )
@@ -410,13 +410,13 @@ with st.container(border=True):
         st.markdown("<div class='toolbar-label'>Workspace</div>", unsafe_allow_html=True)
         workspace = st.selectbox(
             "Workspace",
-            ["⚡ Entry Hunter", "☀️ Morning Drop Afternoon Pop", "🔥 Scanner", "👑 My Portfolio"],
+            ["⭐ Command Center", "⚡ Entry Hunter", "☀️ Morning Drop Afternoon Pop", "🔥 Scanner", "👑 My Portfolio"],
             index=0,
             label_visibility="collapsed",
             key="workspace_selector",
-            help="Entry Hunter finds this week\'s actionable swing entries. Scanner researches the market. Portfolio manages active swing positions and exits.",
+            help="Command Center is the clean discovery view. Specialist workspaces are still available.",
         )
-        st.markdown("<div class='toolbar-help'>Enter, pop, research, or manage</div>", unsafe_allow_html=True)
+        st.markdown("<div class='toolbar-help'>Discover, enter, pop, research, manage</div>", unsafe_allow_html=True)
 
     with top_universe_col:
         st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
@@ -512,7 +512,7 @@ with st.container(border=True):
 
     with top_run_col:
         st.markdown("<div class='toolbar-label'>&nbsp;</div>", unsafe_allow_html=True)
-        run_label = "⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else ("☀️ Run 11AM Pop Scan" if st.session_state.get("workspace_selector") == "☀️ Morning Drop Afternoon Pop" else "🚀 Run Swing Scan")
+        run_label = "⭐ Build Command Center" if st.session_state.get("workspace_selector") == "⭐ Command Center" else ("⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else ("☀️ Run 11AM Pop Scan" if st.session_state.get("workspace_selector") == "☀️ Morning Drop Afternoon Pop" else "🚀 Run Swing Scan"))
         run = st.button(run_label, use_container_width=True, disabled=(st.session_state.get("workspace_selector") == "👑 My Portfolio"))
         st.markdown("<div class='run-note'>Use ToS for entries/exits.</div>", unsafe_allow_html=True)
 
@@ -6059,9 +6059,294 @@ def render_morning_drop_workspace(results: list, universe_name: str, meta: dict 
                 st.write(r.get("reason", ""))
                 st.caption(f"VWAP: {r.get('vwap_label')} ({_safe_float(r.get('vwap_distance_pct')):.2f}%). Best historical entry area: {r.get('best_entry')}. Expected exit window: {r.get('expected_exit')}.")
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# V15 Command Center — simple Finviz-style discovery view
+# ──────────────────────────────────────────────────────────────────────────────
+def _cc_status_from_score(score):
+    try:
+        score = float(score or 0)
+    except Exception:
+        score = 0
+    if score >= 75:
+        return "High"
+    if score >= 55:
+        return "Medium"
+    if score >= 35:
+        return "Watch"
+    return "Low"
+
+
+def _cc_news_tag(row):
+    label = clean_label(row.get("catalyst_label", row.get("news_label", "—")))
+    if not label or label == "—":
+        return "—"
+    # Keep the table clean: one short tag, not the whole analyst note.
+    for word in ["Strong", "Positive", "Negative", "Fresh", "Old", "Mixed", "Event", "News"]:
+        if word.lower() in str(label).lower():
+            return label[:34]
+    return label[:34]
+
+
+def command_center_row(c: dict, source_map: dict | None = None):
+    ticker = c.get("ticker", "—")
+    src = ", ".join((source_map or {}).get(ticker, [])) if source_map else ""
+    rsi = _safe_float(c.get("current_rsi"), None)
+    panic = _safe_float(c.get("panic_drop_pct"), 0) or 0
+    today_chg = None
+    try:
+        df = c.get("df")
+        if df is not None and not df.empty and len(df) >= 2:
+            today_chg = ((float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-2])) - 1) * 100
+    except Exception:
+        today_chg = None
+
+    # Amber Fit: blend the exact things she keeps manually checking.
+    amber_fit = clamp(
+        0.24 * _safe_float(c.get("overreaction_score"), 0) +
+        0.20 * _safe_float(c.get("setup_quality"), 0) +
+        0.17 * _safe_float(c.get("panic_shock_score"), 0) +
+        0.15 * _safe_float(c.get("opportunity_remaining_score"), 0) +
+        0.12 * _safe_float(c.get("catalyst_score"), 0) +
+        0.07 * _safe_float(c.get("stabilization_score"), 0) +
+        0.05 * _safe_float(c.get("trigger_4h_score"), 0)
+    )
+
+    if panic >= 10 and _safe_float(c.get("overreaction_score"), 0) >= 55:
+        bucket = "😱 Damage + Story"
+    elif _safe_float(c.get("setup_quality"), 0) >= 70:
+        bucket = "🎯 Ready / Repairing"
+    elif _safe_float(c.get("attention_score"), 0) >= 70 or (today_chg is not None and abs(today_chg) >= 5):
+        bucket = "🔥 Moving Today"
+    elif _safe_float(c.get("stabilization_score"), 0) >= 60 or _safe_float(c.get("spring_score"), 0) >= 60:
+        bucket = "👀 Early Watch"
+    else:
+        bucket = "Research"
+
+    why_bits = []
+    if panic >= 8:
+        why_bits.append(f"panic {panic:.0f}%")
+    if _safe_float(c.get("catalyst_score"), 0) >= 50:
+        why_bits.append("news")
+    if rsi is not None and rsi < 40:
+        why_bits.append(f"RSI {rsi:.0f}")
+    if _safe_float(c.get("spring_score"), 0) >= 60:
+        why_bits.append("TTM improving")
+    if _safe_float(c.get("trigger_4h_score"), 0) >= 60:
+        why_bits.append("4H improving")
+    if _safe_float(c.get("opportunity_remaining_score"), 0) >= 60:
+        why_bits.append("room left")
+    if not why_bits:
+        why_bits.append(clean_label(c.get("opportunity", "watch")))
+
+    return {
+        "Bucket": bucket,
+        "Ticker": ticker,
+        "Price": c.get("price"),
+        "% Today": round(today_chg, 2) if today_chg is not None else None,
+        "RSI": rsi,
+        "Amber Fit": int(round(amber_fit)),
+        "Overreaction": int(round(_safe_float(c.get("overreaction_score"), 0))),
+        "Setup": int(round(_safe_float(c.get("setup_quality"), 0))),
+        "Panic %": round(panic, 1) if panic else None,
+        "Opportunity Left": c.get("opportunity_remaining_pct"),
+        "News": _cc_news_tag(c),
+        "TTM": clean_label(c.get("spring_label", "—"))[:28],
+        "4H": clean_label(c.get("trigger_4h_label", "—"))[:28],
+        "Trend": clean_label(c.get("trend_label", "—"))[:24] if c.get("trend_label") else "—",
+        "Why It's Here": " · ".join(why_bits)[:88],
+        "Sources": src,
+        "_raw": c,
+    }
+
+
+def render_command_center(results: list, universe_name: str, source_map: dict | None = None, meta: dict | None = None):
+    st.markdown("## ⭐ Command Center")
+    st.caption("Clean discovery view: scan once, filter fast, sort by what matters, then open charts only when something earns attention.")
+
+    if meta:
+        st.markdown(
+            f"<div class='small-muted'>Scan: {html.escape(str(meta.get('universe', universe_name)))} · {int(meta.get('tickers_scanned', 0)):,} tickers · {html.escape(str(meta.get('run_date','')))}</div>",
+            unsafe_allow_html=True,
+        )
+
+    if not results:
+        with st.container(border=True):
+            st.markdown("### Start with one clean market scan")
+            st.write("Command Center will show the most interesting stories across movers, damaged stocks, early watches, and ready-now rebounds — then let you filter like Finviz.")
+            st.caption("Use the top toolbar to choose a universe, then click Build Command Center.")
+        return
+
+    rows = [command_center_row(r, source_map) for r in results]
+    df = pd.DataFrame(rows)
+    if df.empty:
+        st.info("No Command Center rows yet.")
+        return
+
+    # Keep the controls Apple-simple: one row, no giant advanced panel.
+    with st.container(border=True):
+        f1, f2, f3, f4, f5, f6 = st.columns([1.15, 1, 1, 1, 1, 1.1])
+        with f1:
+            preset = st.selectbox("Preset", ["All", "Damage + Story", "Ready / Repairing", "Early Watch", "Moving Today", "Amber Fit High"], key="cc_preset")
+        with f2:
+            rsi_filter = st.selectbox("RSI", ["Any", "<30", "<40", "Recovering 30-50", ">50"], key="cc_rsi")
+        with f3:
+            news_filter = st.selectbox("News", ["Any", "Has news", "Positive-ish", "No news"], key="cc_news")
+        with f4:
+            ttm_filter = st.selectbox("TTM", ["Any", "Improving", "4H improving", "Fired/Turn"], key="cc_ttm")
+        with f5:
+            sort_by = st.selectbox("Sort", ["Amber Fit", "% Today", "Overreaction", "Setup", "Panic %", "RSI"], key="cc_sort")
+        with f6:
+            min_fit = st.slider("Min fit", 0, 100, 0, 5, key="cc_min_fit")
+
+    view = df.copy()
+    if preset == "Damage + Story":
+        view = view[view["Bucket"].eq("😱 Damage + Story")]
+    elif preset == "Ready / Repairing":
+        view = view[view["Bucket"].eq("🎯 Ready / Repairing")]
+    elif preset == "Early Watch":
+        view = view[view["Bucket"].eq("👀 Early Watch")]
+    elif preset == "Moving Today":
+        view = view[view["Bucket"].eq("🔥 Moving Today")]
+    elif preset == "Amber Fit High":
+        view = view[view["Amber Fit"] >= 70]
+
+    if rsi_filter == "<30":
+        view = view[pd.to_numeric(view["RSI"], errors="coerce") < 30]
+    elif rsi_filter == "<40":
+        view = view[pd.to_numeric(view["RSI"], errors="coerce") < 40]
+    elif rsi_filter == "Recovering 30-50":
+        rr = pd.to_numeric(view["RSI"], errors="coerce")
+        view = view[(rr >= 30) & (rr <= 50)]
+    elif rsi_filter == ">50":
+        view = view[pd.to_numeric(view["RSI"], errors="coerce") > 50]
+
+    if news_filter == "Has news":
+        view = view[view["News"].fillna("—").astype(str).ne("—")]
+    elif news_filter == "No news":
+        view = view[view["News"].fillna("—").astype(str).eq("—")]
+    elif news_filter == "Positive-ish":
+        view = view[view["News"].astype(str).str.lower().str.contains("positive|fresh|strong|event|bull|beat", na=False)]
+
+    if ttm_filter == "Improving":
+        view = view[view["TTM"].astype(str).str.lower().str.contains("improv|turn|fired|building|recover", na=False)]
+    elif ttm_filter == "4H improving":
+        view = view[view["4H"].astype(str).str.lower().str.contains("improv|turn|fired|building|recover", na=False)]
+    elif ttm_filter == "Fired/Turn":
+        mask = view["TTM"].astype(str).str.lower().str.contains("fired|turn", na=False) | view["4H"].astype(str).str.lower().str.contains("fired|turn", na=False)
+        view = view[mask]
+
+    view = view[pd.to_numeric(view["Amber Fit"], errors="coerce").fillna(0) >= min_fit]
+    ascending = sort_by == "RSI"
+    view = view.sort_values(sort_by, ascending=ascending, na_position="last")
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Showing", f"{len(view):,}")
+    k2.metric("Damage + Story", f"{int((df['Bucket'] == '😱 Damage + Story').sum()):,}")
+    k3.metric("Ready / Repairing", f"{int((df['Bucket'] == '🎯 Ready / Repairing').sum()):,}")
+    k4.metric("Moving Today", f"{int((df['Bucket'] == '🔥 Moving Today').sum()):,}")
+
+    display_cols = ["Bucket", "Ticker", "Price", "% Today", "RSI", "Amber Fit", "Panic %", "News", "TTM", "4H", "Why It's Here"]
+    st.dataframe(
+        view[[c for c in display_cols if c in view.columns]].head(75),
+        use_container_width=True,
+        hide_index=True,
+        height=520,
+    )
+
+    if not view.empty:
+        selected = st.selectbox("Quick read", view["Ticker"].head(75).tolist(), key="cc_quick_read")
+        raw = next((r.get("_raw") for r in rows if r.get("Ticker") == selected), None)
+        if raw:
+            with st.container(border=True):
+                st.markdown(f"### {selected} — why it matters")
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Amber Fit", f"{int(round(_safe_float(command_center_row(raw).get('Amber Fit'),0)))}")
+                c2.metric("RSI", raw.get("current_rsi", "—"))
+                c3.metric("Setup", f"{raw.get('setup_quality', 0)}/100")
+                c4.metric("Overreaction", f"{raw.get('overreaction_score', 0)}/100")
+                c5.metric("Target", f"${raw.get('potential_sell_price')}" if raw.get("potential_sell_price") else "—")
+                st.write(raw.get("analyst_note") or raw.get("catalyst_reason") or raw.get("panic_reason") or "No quick analyst note available.")
+                if raw.get("news_headline"):
+                    st.caption(f"Headline: {raw.get('news_headline')}")
+                try:
+                    fig = mini_chart(raw)
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+                except Exception:
+                    pass
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Command Center workspace short-circuits the scanner UI.
+if st.session_state.get("workspace_selector") == "⭐ Command Center":
+    if "command_center_results" not in st.session_state:
+        st.session_state.command_center_results = None
+    if "command_center_meta" not in st.session_state:
+        st.session_state.command_center_meta = None
+    if "command_center_sources" not in st.session_state:
+        st.session_state.command_center_sources = {}
+
+    if not run and st.session_state.command_center_results is None:
+        render_command_center([], universe, {}, None)
+        st.stop()
+
+    if run:
+        universe_text = custom_input
+        if universe == "📂 CSV upload":
+            uploaded_tickers = parse_uploaded_tickers(csv_uploaded)
+            universe_text = ",".join(uploaded_tickers)
+        all_tickers, source_map = get_universe_payload(universe, universe_text)
+        if not all_tickers:
+            st.warning("No tickers found. Check your custom list or choose another universe.")
+            st.stop()
+        st.info(f"⭐ Building Command Center: scanning {len(all_tickers):,} tickers from {universe}…")
+        progress = st.progress(0)
+        status = st.empty()
+        leaders_box = st.empty()
+        results = []
+        completed = 0
+        # Command Center uses the core SwingIt read so all prior intelligence flows into one clean table.
+        with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
+            future_map = {
+                executor.submit(compute_candidate, ticker, profit_target, bounce_window, include_news, spring_timeframe): ticker
+                for ticker in all_tickers
+            }
+            for future in as_completed(future_map):
+                ticker = future_map[future]
+                completed += 1
+                try:
+                    candidate = future.result()
+                except Exception:
+                    candidate = None
+                if candidate:
+                    results.append(candidate)
+                progress.progress(min(completed / max(len(all_tickers), 1), 1.0))
+                status.caption(f"Command Center · scanned {completed:,} / {len(all_tickers):,} · latest: {ticker} · usable: {len(results):,}")
+                if results and (completed % 50 == 0 or completed == len(all_tickers)):
+                    preview = sorted(results, key=lambda r: float(command_center_row(r).get('Amber Fit', 0)), reverse=True)[:5]
+                    leaders_box.info("Live Command leaders: " + " · ".join([f"{r.get('ticker')} {int(command_center_row(r).get('Amber Fit', 0))}" for r in preview]))
+        progress.empty(); status.empty(); leaders_box.empty()
+        st.session_state.command_center_results = sorted(results, key=lambda r: float(command_center_row(r).get("Amber Fit", 0)), reverse=True)
+        st.session_state.command_center_sources = source_map
+        st.session_state.command_center_meta = {
+            "universe": universe,
+            "tickers_scanned": len(all_tickers),
+            "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p"),
+        }
+
+    render_command_center(
+        st.session_state.command_center_results or [],
+        (st.session_state.command_center_meta or {}).get("universe", universe),
+        st.session_state.command_center_sources or {},
+        st.session_state.command_center_meta,
+    )
+    st.stop()
+
 # Portfolio workspace short-circuits the scanner UI.
 if st.session_state.get("workspace_selector") == "👑 My Portfolio":
     render_portfolio_command_center()
