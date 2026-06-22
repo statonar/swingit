@@ -1,5 +1,5 @@
 """
-SwingIt V15.2.0 — Command Center Workspace
+SwingIt V16.0 — Stock Verifier
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V15.2",
+    page_title="SwingIt V16",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -400,8 +400,8 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V15.2</div>
-            <div class="terminal-subtitle">Simple Command Center + specialist workspaces.</div>
+            <div class="terminal-title">🔥 SwingIt V16</div>
+            <div class="terminal-subtitle">Command Center + one-ticker Stock Verifier.</div>
             """,
             unsafe_allow_html=True,
         )
@@ -410,13 +410,13 @@ with st.container(border=True):
         st.markdown("<div class='toolbar-label'>Workspace</div>", unsafe_allow_html=True)
         workspace = st.selectbox(
             "Workspace",
-            ["⭐ Command Center", "⚡ Entry Hunter", "☀️ Morning Drop Afternoon Pop", "🔥 Scanner", "👑 My Portfolio"],
+            ["⭐ Command Center", "🔎 Stock Verifier", "⚡ Entry Hunter", "☀️ Morning Drop Afternoon Pop", "🔥 Scanner", "👑 My Portfolio"],
             index=0,
             label_visibility="collapsed",
             key="workspace_selector",
             help="Command Center is the clean discovery view. Specialist workspaces are still available.",
         )
-        st.markdown("<div class='toolbar-help'>Discover, enter, pop, research, manage</div>", unsafe_allow_html=True)
+        st.markdown("<div class='toolbar-help'>Discover, verify, enter, pop, manage</div>", unsafe_allow_html=True)
 
     with top_universe_col:
         st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
@@ -512,8 +512,8 @@ with st.container(border=True):
 
     with top_run_col:
         st.markdown("<div class='toolbar-label'>&nbsp;</div>", unsafe_allow_html=True)
-        run_label = "⭐ Build Command Center" if st.session_state.get("workspace_selector") == "⭐ Command Center" else ("⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else ("☀️ Run 11AM Pop Scan" if st.session_state.get("workspace_selector") == "☀️ Morning Drop Afternoon Pop" else "🚀 Run Swing Scan"))
-        run = st.button(run_label, use_container_width=True, disabled=(st.session_state.get("workspace_selector") == "👑 My Portfolio"))
+        run_label = "⭐ Build Command Center" if st.session_state.get("workspace_selector") == "⭐ Command Center" else ("🔎 Verify Ticker" if st.session_state.get("workspace_selector") == "🔎 Stock Verifier" else ("⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else ("☀️ Run 11AM Pop Scan" if st.session_state.get("workspace_selector") == "☀️ Morning Drop Afternoon Pop" else "🚀 Run Swing Scan")))
+        run = st.button(run_label, use_container_width=True, disabled=(st.session_state.get("workspace_selector") in ["👑 My Portfolio", "🔎 Stock Verifier"]))
         st.markdown("<div class='run-note'>Use ToS for entries/exits.</div>", unsafe_allow_html=True)
 
 if universe == "Custom list":
@@ -6343,9 +6343,342 @@ def render_command_center(results: list, universe_name: str, source_map: dict | 
                     pass
 
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# V16 Stock Verifier — one-ticker decision page
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _fmt_money(v):
+    try:
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return "—"
+        return f"${float(v):,.2f}"
+    except Exception:
+        return "—"
+
+
+def _fmt_pct(v, decimals=1):
+    try:
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return "—"
+        return f"{float(v):.{decimals}f}%"
+    except Exception:
+        return "—"
+
+
+def _verifier_trade_type(candidate: dict, info: dict | None = None):
+    candidate = candidate or {}
+    info = info or {}
+    price = _safe_float(candidate.get("price"), 0)
+    trend = str(candidate.get("trend_label", "")).lower()
+    panic = _safe_float(candidate.get("panic_drop_pct"), 0)
+    mcap = _safe_float(info.get("marketCap"), 0)
+    if price and price < 5 and mcap and mcap < 500_000_000:
+        return "🔴 Speculative Squeeze"
+    if "broken" in trend or "weak" in trend:
+        return "🟠 Repricing / Trend Repair"
+    if panic >= 10:
+        return "🟢 Panic Recovery"
+    if _safe_float(candidate.get("today_change_pct"), 0) >= 5 and _safe_float(candidate.get("volume_ratio"), 0) >= 2:
+        return "🔥 Momentum Ignition"
+    if "strong" in trend:
+        return "🟢 Quality Pullback"
+    return "🟡 Research Candidate"
+
+
+def _verifier_buy_verdict(candidate: dict, trade_type: str):
+    amber = _safe_float(command_center_row(candidate).get("Amber Fit"), 0) if candidate else 0
+    setup = _safe_float(candidate.get("setup_quality"), 0) if candidate else 0
+    trend_label = str(candidate.get("trend_label", "")).lower() if candidate else ""
+    if "Speculative" in trade_type or "broken" in trend_label:
+        return "🔴 Avoid", amber
+    if amber >= 78 and setup >= 70:
+        return "🟢 Buy Zone / Verify Entry", amber
+    if amber >= 62 or setup >= 60:
+        return "🟡 Watch Closely", amber
+    return "🟠 Wait For Confirmation", amber
+
+
+def _calculate_buy_zone(candidate: dict, df: pd.DataFrame | None, expected_move_pct: float | None = None):
+    price = _safe_float(candidate.get("price"), None)
+    if not price or df is None or df.empty:
+        return {"low": None, "high": None, "best": None, "confidence": "Weak", "reason": "Not enough chart data."}
+    close = df["Close"].astype(float)
+    low = df["Low"].astype(float) if "Low" in df.columns else close
+    try:
+        ema20 = ta.trend.EMAIndicator(close, window=20).ema_indicator().dropna().iloc[-1]
+    except Exception:
+        ema20 = price
+    try:
+        sma50 = ta.trend.SMAIndicator(close, window=50).sma_indicator().dropna().iloc[-1]
+    except Exception:
+        sma50 = price
+    recent_low = float(low.tail(10).min())
+    support_candidates = [x for x in [recent_low, float(ema20), float(sma50), price * 0.985] if x and x > 0 and x <= price * 1.02]
+    support = max(min(support_candidates), price * 0.90) if support_candidates else price * 0.97
+    # Keep the zone practical: roughly the lower 0-3% band around current price/support.
+    zone_low = max(min(support, price * 0.985), price * 0.94)
+    zone_high = min(price * 1.005, max(price * 0.995, zone_low * 1.025))
+    best = (zone_low + zone_high) / 2
+    trend_score = _safe_float(candidate.get("trend_score"), 0)
+    setup_score = _safe_float(candidate.get("setup_quality"), 0)
+    confidence = "Strong" if setup_score >= 70 and trend_score >= 50 else ("Moderate" if setup_score >= 50 else "Weak")
+    return {
+        "low": round(zone_low, 2),
+        "high": round(zone_high, 2),
+        "best": round(best, 2),
+        "confidence": confidence,
+        "reason": "Buy zone blends recent support, 20/50-day averages, current price, and recovery setup quality.",
+    }
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _get_yf_info_and_news(ticker: str):
+    info = {}
+    news_rows = []
+    try:
+        tk = yf.Ticker(ticker)
+        try:
+            info = tk.info or {}
+        except Exception:
+            info = {}
+        try:
+            raw_news = tk.news or []
+        except Exception:
+            raw_news = []
+        for n in raw_news[:8]:
+            content = n.get("content", n) if isinstance(n, dict) else {}
+            title = content.get("title") or n.get("title") or "Untitled"
+            publisher = content.get("provider", {}).get("displayName") if isinstance(content.get("provider"), dict) else (n.get("publisher") or "News")
+            link = content.get("canonicalUrl", {}).get("url") if isinstance(content.get("canonicalUrl"), dict) else (n.get("link") or n.get("url"))
+            summary = content.get("summary") or n.get("summary") or ""
+            pub_time = content.get("pubDate") or n.get("providerPublishTime") or ""
+            news_rows.append({"title": title, "publisher": publisher or "News", "link": link, "summary": summary, "time": pub_time})
+    except Exception:
+        pass
+    return info, news_rows
+
+
+def _options_expectations(ticker: str, price: float | None, target_price: float | None = None):
+    out = {"iv": None, "expiry": None, "expected_move_pct": None, "expected_move_dollars": None, "target_probability_note": "Options data unavailable."}
+    if not price:
+        return out
+    try:
+        tk = yf.Ticker(ticker)
+        expiries = list(tk.options or [])
+        if not expiries:
+            return out
+        expiry = expiries[0]
+        chain = tk.option_chain(expiry)
+        calls = chain.calls.copy()
+        puts = chain.puts.copy()
+        if calls.empty:
+            return out
+        calls["dist"] = (calls["strike"] - price).abs()
+        atm = calls.sort_values("dist").iloc[0]
+        iv = _safe_float(atm.get("impliedVolatility"), None)
+        exp_date = pd.to_datetime(expiry).date()
+        days = max((exp_date - datetime.date.today()).days, 1)
+        expected_move_pct = None
+        expected_move_dollars = None
+        if iv:
+            expected_move_pct = float(iv) * math.sqrt(days / 365.0) * 100
+            expected_move_dollars = price * expected_move_pct / 100.0
+        note = "Options market range unavailable."
+        if target_price and expected_move_dollars:
+            diff = target_price - price
+            if diff <= expected_move_dollars:
+                note = "Recovery target sits inside the current options expected move."
+            elif diff <= expected_move_dollars * 1.75:
+                note = "Recovery target is above the expected move but still within a plausible stretch."
+            else:
+                note = "Recovery target is well outside the current options expected move."
+        out.update({
+            "iv": round(iv * 100, 1) if iv else None,
+            "expiry": expiry,
+            "expected_move_pct": round(expected_move_pct, 1) if expected_move_pct else None,
+            "expected_move_dollars": round(expected_move_dollars, 2) if expected_move_dollars else None,
+            "target_probability_note": note,
+        })
+    except Exception:
+        pass
+    return out
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def compute_stock_verifier(ticker: str, profit_target: int = 8, bounce_days: int = 30, include_news_lookup: bool = True):
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return None
+    candidate = compute_candidate(ticker, profit_target, bounce_days, include_news_lookup, "1D")
+    if not candidate:
+        return None
+    info, news_rows = _get_yf_info_and_news(ticker)
+    price = _safe_float(candidate.get("price"), None)
+    target = _safe_float(candidate.get("potential_sell_price"), None)
+    options = _options_expectations(ticker, price, target)
+    buy_zone = _calculate_buy_zone(candidate, candidate.get("df"), options.get("expected_move_pct"))
+    trade_type = _verifier_trade_type(candidate, info)
+    verdict, amber_fit = _verifier_buy_verdict(candidate, trade_type)
+    # Risk / reward at suggested best entry.
+    best_entry = buy_zone.get("best") or price
+    stop = None
+    rr = None
+    if best_entry and candidate.get("df") is not None:
+        try:
+            recent_low = float(candidate["df"]["Low"].astype(float).tail(10).min())
+            stop = min(best_entry * 0.97, recent_low * 0.985)
+            upside = (target - best_entry) if target and best_entry else None
+            downside = (best_entry - stop) if stop and best_entry else None
+            if upside and downside and downside > 0:
+                rr = upside / downside
+        except Exception:
+            pass
+    return {
+        "ticker": ticker,
+        "candidate": candidate,
+        "info": info,
+        "news_rows": news_rows,
+        "options": options,
+        "buy_zone": buy_zone,
+        "trade_type": trade_type,
+        "verdict": verdict,
+        "amber_fit": int(round(amber_fit)),
+        "stop": round(stop, 2) if stop else None,
+        "risk_reward": round(rr, 2) if rr else None,
+    }
+
+
+def render_stock_verifier_workspace():
+    st.markdown("## 🔎 Stock Verifier")
+    st.caption("One ticker in. One decision page out. Designed for quick deep research after Command Center, Finviz, ToS, or a scanner gives you a name.")
+    with st.container(border=True):
+        c1, c2, c3 = st.columns([1.2, 1, 1])
+        with c1:
+            ticker = st.text_input("Ticker", value=st.session_state.get("verifier_last_ticker", ""), placeholder="ADSK", key="verifier_ticker_input").strip().upper()
+        with c2:
+            goal = st.selectbox("Recovery target", [5, 8, 10, 12, 15, 20], index=1, key="verifier_goal")
+        with c3:
+            go = st.button("🔎 Verify Stock", use_container_width=True, key="verifier_run_button")
+    if go and ticker:
+        st.session_state.verifier_last_ticker = ticker
+        with st.spinner(f"Verifying {ticker}…"):
+            st.session_state.verifier_result = compute_stock_verifier(ticker, int(goal), 30, True)
+    result = st.session_state.get("verifier_result")
+    if not result:
+        with st.container(border=True):
+            st.markdown("### How to use it")
+            st.write("Paste one ticker and SwingIt will assemble the chart read, news, risk type, buy zone, options expectations, historical recovery context, and final Amber-style checklist.")
+        return
+
+    t = result["ticker"]
+    c = result["candidate"]
+    info = result.get("info") or {}
+    price = _safe_float(c.get("price"), None)
+    target = _safe_float(c.get("potential_sell_price"), None)
+    bz = result.get("buy_zone", {})
+    opt = result.get("options", {})
+
+    st.markdown(f"### {t} — {info.get('shortName') or info.get('longName') or 'Stock'}")
+    top1, top2, top3, top4 = st.columns(4)
+    top1.metric("Would I Buy Today?", result.get("verdict", "—"))
+    top2.metric("Amber Fit", f"{result.get('amber_fit', 0)}/100")
+    top3.metric("Trade Type", result.get("trade_type", "—"))
+    top4.metric("Current", _fmt_money(price))
+
+    with st.container(border=True):
+        st.markdown("#### 🎯 Buy Zone")
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Good buy range", f"{_fmt_money(bz.get('low'))} - {_fmt_money(bz.get('high'))}")
+        b2.metric("Best entry", _fmt_money(bz.get("best")))
+        b3.metric("Confidence", bz.get("confidence", "—"))
+        b4.metric("Risk / Reward", f"{result.get('risk_reward')} : 1" if result.get("risk_reward") else "—")
+        st.caption(bz.get("reason", ""))
+        if target:
+            st.caption(f"Recovery target: {_fmt_money(target)} · Opportunity remaining: {_fmt_pct(c.get('opportunity_remaining_pct'))} · Suggested risk stop: {_fmt_money(result.get('stop'))}")
+
+    with st.container(border=True):
+        st.markdown("#### 📰 Latest News & Catalyst Read")
+        st.write(c.get("catalyst_reason") or c.get("news_headline") or "No catalyst summary available.")
+        rows = result.get("news_rows") or []
+        if rows:
+            for n in rows[:5]:
+                title = html.escape(str(n.get("title") or "Untitled"))
+                pub = html.escape(str(n.get("publisher") or "News"))
+                link = n.get("link")
+                summary = html.escape(str(n.get("summary") or ""))[:280]
+                if link:
+                    st.markdown(f"- [{title}]({link})  ")
+                else:
+                    st.markdown(f"- **{title}**")
+                st.caption(f"{pub}" + (f" — {summary}" if summary else ""))
+        else:
+            st.caption("No article links returned from the data provider. Use the headline summary above and verify manually if this is a news-driven trade.")
+
+    col_left, col_right = st.columns([1.1, 1])
+    with col_left:
+        with st.container(border=True):
+            st.markdown("#### 📈 Technical Story")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("RSI", c.get("current_rsi", "—"))
+            m2.metric("Daily TTM", _cc_ttm_state(c.get("spring_label", "—")))
+            m3.metric("4H", _cc_ttm_state(c.get("trigger_4h_label", "—")))
+            m4.metric("Trend", clean_label(c.get("trend_label", "—"))[:18])
+            st.write(c.get("analyst_note") or c.get("panic_reason") or "Momentum and recovery read available in the metrics above.")
+            try:
+                fig = mini_chart(c)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+            except Exception:
+                pass
+    with col_right:
+        with st.container(border=True):
+            st.markdown("#### 🧠 Options Market Expectations")
+            o1, o2 = st.columns(2)
+            o1.metric("IV", _fmt_pct(opt.get("iv")))
+            o2.metric("Expected Move", f"±{_fmt_money(opt.get('expected_move_dollars'))}" if opt.get("expected_move_dollars") else "—")
+            st.caption(f"Expiry used: {opt.get('expiry') or '—'} · Expected move: ±{_fmt_pct(opt.get('expected_move_pct'))}")
+            st.write(opt.get("target_probability_note", "Options data unavailable."))
+        with st.container(border=True):
+            st.markdown("#### ⚠️ Why Not?")
+            warnings = []
+            if "Speculative" in result.get("trade_type", ""):
+                warnings.append("Speculative / low-price behavior can move violently and ignore normal technicals.")
+            if "Repricing" in result.get("trade_type", ""):
+                warnings.append("Could be a repricing event, not a clean overreaction.")
+            if _safe_float(c.get("trend_score"), 0) < 35:
+                warnings.append("Longer-term trend health is weak.")
+            if _safe_float(c.get("catalyst_score"), 0) < 25:
+                warnings.append("No strong catalyst detected yet.")
+            if not warnings:
+                warnings.append("No major red flags detected by the verifier. Still confirm live chart and news before trading.")
+            for w in warnings:
+                st.markdown(f"- {w}")
+
+    with st.container(border=True):
+        st.markdown("#### ✅ Amber Checklist")
+        checklist = [
+            ("Business/story understood", bool(c.get("news_headline") or c.get("catalyst_reason"))),
+            ("Chart repairing", _safe_float(c.get("setup_quality"), 0) >= 55),
+            ("Not a broken downtrend", _safe_float(c.get("trend_score"), 0) >= 35),
+            ("Opportunity remains", (_safe_float(c.get("opportunity_remaining_score"), 0) >= 45)),
+            ("Risk/reward acceptable", (result.get("risk_reward") or 0) >= 2),
+        ]
+        cols = st.columns(len(checklist))
+        for i, (label, ok) in enumerate(checklist):
+            cols[i].metric(label, "✓" if ok else "—")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+# Stock Verifier workspace short-circuits all scanner UI.
+if st.session_state.get("workspace_selector") == "🔎 Stock Verifier":
+    render_stock_verifier_workspace()
+    st.stop()
 
 # Command Center workspace short-circuits the scanner UI.
 if st.session_state.get("workspace_selector") == "⭐ Command Center":
