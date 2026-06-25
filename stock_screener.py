@@ -1,5 +1,5 @@
 """
-SwingIt V16.2 — Stock Verifier + Options Intelligence
+SwingIt V17 — Capital First Scanner
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V16.2",
+    page_title="SwingIt V17",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -264,6 +264,77 @@ st.markdown(
     .read-title {font-weight:950;font-size:.88rem;margin-bottom:5px;}
     .read-text {font-size:.84rem;color:#475569;line-height:1.45;}
 
+
+
+    /* V17 Capital First dark scanner polish */
+    :root {
+        --bg:#06111f;
+        --surface:#0b1b2e;
+        --surface-2:#10243b;
+        --border:#223a57;
+        --text:#f8fafc;
+        --muted:#9fb0c7;
+        --accent:#8cff5a;
+        --green:#7cf05a;
+        --red:#ff6b6b;
+        --amber:#ffb020;
+    }
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+        background:radial-gradient(circle at top left,#0e2540 0,#06111f 38%,#030914 100%)!important;
+        color:var(--text)!important;
+    }
+    [data-testid="stSidebar"] {
+        background:linear-gradient(180deg,#081827 0%,#06101c 100%)!important;
+        border-right:1px solid var(--border)!important;
+    }
+    h1,h2,h3,h4,p,span,label,div { color:var(--text); }
+    .small-muted, .toolbar-help, .terminal-subtitle { color:var(--muted)!important; }
+    .terminal-hero {
+        background:linear-gradient(135deg,rgba(12,31,54,.95) 0%,rgba(5,16,29,.95) 100%)!important;
+        border:1px solid rgba(140,255,90,.18)!important;
+        box-shadow:0 18px 42px rgba(0,0,0,.28)!important;
+    }
+    [data-testid="stMetric"], [data-testid="stDataFrame"], .quick-filter-card {
+        background:rgba(11,27,46,.92)!important;
+        border-color:var(--border)!important;
+    }
+    .hot-card {
+        background:linear-gradient(180deg,rgba(13,31,52,.98) 0%,rgba(8,22,39,.98) 100%)!important;
+        border:1px solid rgba(101,126,156,.45)!important;
+        box-shadow:0 12px 28px rgba(0,0,0,.25)!important;
+        min-height:330px!important;
+        padding:14px 14px 12px 14px!important;
+    }
+    .hot-card:hover { border-color:rgba(140,255,90,.55)!important; transform:translateY(-1px); transition:all .16s ease; }
+    .hot-title { color:#fff!important; font-size:1.08rem!important; letter-spacing:-.02em; }
+    .company-name { color:var(--muted)!important; display:block; margin-left:0!important; margin-top:2px; }
+    .analyst-verdict-box { background:transparent!important; border:none!important; padding:0!important; margin:8px 0!important; }
+    .verdict-line { color:#b9ff7a!important; font-size:.68rem!important; }
+    .verdict-summary { color:var(--muted)!important; }
+    .verdict-confidence { background:rgba(140,255,90,.12)!important; color:#c9ffac!important; border-color:rgba(140,255,90,.22)!important; }
+    .score-row { grid-template-columns:repeat(2,1fr)!important; gap:8px!important; }
+    .score-tile { background:rgba(10,26,45,.78)!important; border-color:rgba(82,108,138,.55)!important; }
+    .score-num { color:#b8ff3d!important; font-size:1.45rem!important; }
+    .score-label { color:#d7e2ef!important; text-transform:none!important; font-size:.68rem!important; }
+    .capital-move-pill {display:inline-flex;align-items:center;gap:6px;border-radius:9px;padding:7px 9px;font-weight:900;font-size:.72rem;margin:5px 0 8px 0;color:#08111f!important;}
+    .capital-move-csp {background:linear-gradient(135deg,#ffb020,#ff8a00);}
+    .capital-move-buy {background:linear-gradient(135deg,#82f05e,#37c861);}
+    .capital-move-wait {background:linear-gradient(135deg,#8aa4c2,#627a98);color:#fff!important;}
+    .recovery-box {float:right;background:rgba(11,29,50,.9);border:1px solid rgba(123,148,178,.5);border-radius:10px;padding:7px 9px;text-align:center;margin-left:8px;min-width:68px;}
+    .recovery-box .big {font-size:1.2rem;font-weight:950;color:#fff;line-height:1;}
+    .recovery-box .small {font-size:.58rem;color:var(--muted);margin-top:3px;}
+    .why-list {font-size:.72rem;color:#dce7f4;line-height:1.55;margin-top:6px;}
+    .why-list div {color:#dce7f4!important;}
+    .why-check {color:#8cff5a!important;font-weight:950;margin-right:5px;}
+    .rank-badge {display:inline-flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#a5ff66,#57d957);color:#06111f!important;border-radius:8px;font-weight:950;width:30px;height:30px;margin-right:8px;}
+    .price-chip {float:right;text-align:right;font-weight:950;font-size:.9rem;color:#fff;}
+    .price-chip .neg {color:#ff6b6b;font-size:.7rem;}
+    .price-chip .pos {color:#7cf05a;font-size:.7rem;}
+    .capital-card-subhead {font-size:.67rem;color:var(--muted);font-weight:800;text-transform:uppercase;margin:8px 0 2px 0;}
+    .hot-meta {display:none!important;}
+    .tip-box {background:#06111f!important;border-color:var(--border)!important;color:#e5eef8!important;}
+    .stButton>button {background:#8cff5a!important;color:#06111f!important;border-radius:10px!important;font-weight:900!important;}
+
 </style>
 """,
     unsafe_allow_html=True,
@@ -400,8 +471,8 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V17</div>
-            <div class="terminal-subtitle">Command Center + Stock Verifier + Capital Engine.</div>
+            <div class="terminal-title">Swing<span style="color:#8cff5a">IT</span> V17</div>
+            <div class="terminal-subtitle">Capital First · fewer, higher-conviction ideas.</div>
             """,
             unsafe_allow_html=True,
         )
@@ -3277,6 +3348,7 @@ def compute_candidate(ticker: str, profit_target: int, bounce_days: int, include
 # Ranking engine — lets the same scan answer different trader questions
 # ──────────────────────────────────────────────────────────────────────────────
 RANKING_MODES = [
+    "⭐ Highest Conviction",
     "🎯 8% Target Hunter",
     "⚡ Ready Now",
     "🧠 Highest Confidence",
@@ -3286,6 +3358,7 @@ RANKING_MODES = [
 ]
 
 RANKING_HELP = {
+    "⭐ Highest Conviction": "Ranks the fewest, highest-quality capital ideas by blending swing opportunity, ownership quality, recovery behavior, and current entry method.",
     "🎯 8% Target Hunter": "Ranks for the best blend of historical rebound edge, current turn-zone timing, confidence, and chance of reaching your selected profit target.",
     "⚡ Ready Now": "Ranks for names closest to a near-term trigger: strong setup quality, spring timing, RVOL/attention, fresh catalyst, and volume trend.",
     "🧠 Highest Confidence": "Ranks for the most repeatable historical pattern: more events, stronger confidence, better swing history, and cleaner risk/reward.",
@@ -3435,11 +3508,16 @@ def add_ranking_scores(frame: pd.DataFrame, target_pct: float, window_days: int)
     out["🧊 Stabilizing Panic Score"] = [int(round(x[5])) for x in scores]
     out["Target Bounce Score"] = [int(round(x[6])) for x in scores]
     out["Speed Score"] = [int(round(x[7])) for x in scores]
+    out["Wheel Score"] = out.apply(v17_wheel_score_from_row, axis=1)
+    out["Capital Move"] = out.apply(lambda r: v17_capital_move_from_row(r)[0], axis=1)
+    out["Capital Verdict"] = out.apply(v17_verdict_from_row, axis=1)
+    out["⭐ Highest Conviction Score"] = out.apply(v17_rank_score_from_row, axis=1)
     return out
 
 
 def ranking_column_for(mode: str) -> str:
     return {
+        "⭐ Highest Conviction": "⭐ Highest Conviction Score",
         "🎯 8% Target Hunter": "🎯 Target Hunter Score",
         "⚡ Ready Now": "⚡ Ready Now Score",
         "🧠 Highest Confidence": "🧠 Confidence Rank Score",
@@ -3830,6 +3908,120 @@ def volume_trend_from_series(volume):
     return int(score), label, reason
 
 
+
+def _v17_num(value, default=0.0):
+    try:
+        if value is None or pd.isna(value):
+            return float(default)
+        if isinstance(value, str):
+            value = value.replace("%", "").replace("+", "").replace("$", "").strip()
+            if value in {"", "—", "nan", "None"}:
+                return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def v17_wheel_score_from_row(row):
+    """V17 v1: simple Wheel Candidate score using data the scanner already has.
+
+    This intentionally does NOT pretend to know the option chain yet. Options IV/liquidity
+    can be added in a later Capital Engine pass. For now, this asks: is this a company/setup
+    Amber would be comfortable owning if assigned?
+    """
+    institution = _v17_num(row.get("Institution Score"), 35)
+    history = _v17_num(row.get("History Score"), 50)
+    confidence = _v17_num(row.get("Confidence Score"), 45)
+    setup = _v17_num(row.get("Setup Quality"), 50)
+    opp = _v17_num(row.get("Opportunity Score"), 50)
+    remaining = _v17_num(row.get("Opportunity Remaining Score"), 50)
+    catalyst = _v17_num(row.get("Catalyst Score"), 45)
+    stage = _v17_num(row.get("Rebound Stage Score"), 45)
+    red_flag_penalty = 18 if has_major_red_flag(row) else 0
+    extended_penalty = 12 if is_extended_stage(row) else 0
+    bad_spring_penalty = 8 if is_bad_spring(row) else 0
+    score = (
+        0.26 * institution +
+        0.22 * history +
+        0.14 * confidence +
+        0.13 * setup +
+        0.10 * remaining +
+        0.07 * opp +
+        0.05 * catalyst +
+        0.03 * stage -
+        red_flag_penalty - extended_penalty - bad_spring_penalty
+    )
+    return int(round(clamp(score)))
+
+
+def v17_capital_move_from_row(row):
+    wheel = _v17_num(row.get("Wheel Score"), v17_wheel_score_from_row(row))
+    setup = _v17_num(row.get("Setup Quality"), 0)
+    opp = _v17_num(row.get("Opportunity Score"), 0)
+    rsi = _v17_num(row.get("RSI"), 999)
+    remaining = _v17_num(row.get("Opportunity Remaining Score"), 0)
+    spring = _v17_num(row.get("Spring Score"), 0)
+    stage = _v17_num(row.get("Rebound Stage Score"), 0)
+    if has_major_red_flag(row) or wheel < 55:
+        return "🔵 Wait", "capital-move-wait"
+    # Buy shares when the setup is already in a strong current entry zone.
+    if setup >= 76 and opp >= 68 and rsi <= 45 and spring >= 55 and remaining >= 35:
+        return "🟢 Buy Shares", "capital-move-buy"
+    # Sell CSP when the company/setup is attractive but timing or price is not quite ideal.
+    if wheel >= 72 and remaining >= 35 and (rsi > 38 or setup < 76 or stage < 70):
+        return "🟡 Sell Cash Secured Put", "capital-move-csp"
+    if wheel >= 70 and setup >= 65:
+        return "🟡 Sell Cash Secured Put", "capital-move-csp"
+    return "🔵 Wait", "capital-move-wait"
+
+
+def v17_verdict_from_row(row):
+    wheel = _v17_num(row.get("Wheel Score"), v17_wheel_score_from_row(row))
+    active = _v17_num(row.get("Active Rank Score"), row.get("Setup Quality", 0))
+    setup = _v17_num(row.get("Setup Quality"), 0)
+    if has_major_red_flag(row):
+        return "🔴 Research First"
+    if wheel >= 88 and active >= 88 and setup >= 70:
+        return "🟢 Excellent Capital Opportunity"
+    if wheel >= 78 and active >= 78:
+        return "🟡 Good Opportunity"
+    if wheel >= 68 or active >= 70:
+        return "🔵 Watch"
+    return "⚪ Wait"
+
+
+def v17_why_today_from_row(row):
+    bullets = []
+    if _v17_num(row.get("Institution Score"), 0) >= 75:
+        bullets.append("Mid/large quality universe")
+    if _v17_num(row.get("Overreaction Score"), 0) >= 70:
+        bullets.append("Possible overreaction setup")
+    if _v17_num(row.get("History Score"), 0) >= 70 or _v17_num(row.get("Win Rate"), 0) >= 70:
+        bullets.append("Strong recovery history")
+    if _v17_num(row.get("Opportunity Remaining Score"), 0) >= 70:
+        bullets.append("Move still has room")
+    if _v17_num(row.get("Spring Score"), 0) >= 65:
+        bullets.append("TTM / momentum improving")
+    if _v17_num(row.get("4H Trigger Score"), 0) >= 65:
+        bullets.append("4H trigger improving")
+    if _v17_num(row.get("Catalyst Score"), 0) >= 65:
+        bullets.append("News catalyst support")
+    if not bullets:
+        bullets = ["Interesting setup", "Needs verification", "Watch price action"]
+    return bullets[:3]
+
+
+def v17_rank_score_from_row(row):
+    wheel = _v17_num(row.get("Wheel Score"), v17_wheel_score_from_row(row))
+    target = _v17_num(row.get("🎯 Target Hunter Score"), 0)
+    ready = _v17_num(row.get("⚡ Ready Now Score"), 0)
+    overreaction = _v17_num(row.get("😱 Overreaction Rank Score"), 0)
+    news = _v17_num(row.get("News Intel Score"), row.get("Catalyst Score", 50))
+    score = 0.36 * target + 0.30 * wheel + 0.18 * ready + 0.10 * overreaction + 0.06 * news
+    if has_major_red_flag(row):
+        score -= 20
+    return int(round(clamp(score)))
+
 def hot_card(rank, row):
     rank_label = f"#{rank + 1}"
     ticker = _safe_html(row.get("Ticker"))
@@ -4064,19 +4256,49 @@ def hot_card(rank, row):
         This does not make a trade good by itself. It simply tells you whether the setup is appearing in a stock that belongs to higher-quality index/ETF-style universes.
     """
 
+    wheel_score = row.get("Wheel Score", v17_wheel_score_from_row(row))
+    capital_move, capital_class = v17_capital_move_from_row(row)
+    capital_verdict = row.get("Capital Verdict", v17_verdict_from_row(row))
+    why_bullets = v17_why_today_from_row(row)
+    why_html = "".join([f"<div><span class='why-check'>✓</span>{_safe_html(b)}</div>" for b in why_bullets])
+    recovery_pct = row.get("Win Rate", None)
+    if recovery_pct in [None, "", "—"] or (isinstance(recovery_pct, float) and pd.isna(recovery_pct)):
+        recovery_pct = row.get("Opportunity Remaining Score", "—")
+    try:
+        recovery_pct_fmt = f"{float(recovery_pct):.0f}%"
+    except Exception:
+        recovery_pct_fmt = _safe_html(recovery_pct)
+    try:
+        avg_days_fmt = f"Avg {float(avg_days):.0f} Days"
+    except Exception:
+        avg_days_fmt = "Avg days n/a"
+    try:
+        price_fmt = f"${float(current_price):.2f}"
+    except Exception:
+        price_fmt = _safe_html(current_price)
+    try:
+        target_pct_num = float(target_gain_pct)
+        target_line = f"<div class='pos'>+{target_pct_num:.1f}% target</div>" if target_pct_num >= 0 else f"<div class='neg'>{target_pct_num:.1f}% target</div>"
+    except Exception:
+        target_line = ""
+
     return f"""
     <div class="hot-card">
-        <div class="hot-title">{rank_label} {ticker}{company_html}</div>
+        <div class="hot-title"><span class="rank-badge">{rank + 1}</span>{ticker}<div class="price-chip">{price_fmt}{target_line}</div>{company_html}</div>
         <div class="analyst-verdict-box hover-tip">
-            <div class="verdict-line"><span class="dot {dot_class(analyst_action)}"></span>{_safe_html(clean_label(analyst_action))}<span class="verdict-confidence">Confidence: {_safe_html(analyst_confidence)}</span></div>
-            <div class="verdict-summary">{_safe_html(analyst_summary)}</div>
+            <div class="verdict-line"><span class="dot {dot_class(capital_verdict)}"></span>{_safe_html(clean_label(capital_verdict))}<span class="verdict-confidence">V17</span></div>
+            <div class="verdict-summary">{_safe_html(clean_label(analyst_summary))}</div>
             <div class="tip-box">{analyst_tip}</div>
         </div>
         <div class="score-row">
-            <div class="score-tile hover-tip"><div class="score-num">{swing_score}</div><div class="score-label">Swing</div><div class="tip-box">{swing_tip}</div></div>
-            <div class="score-tile hover-tip"><div class="score-num">{setup_quality}</div><div class="score-label">Setup</div><div class="tip-box">{setup_tip}</div></div>
-            <div class="score-tile hover-tip"><div class="score-num">{spring_score}</div><div class="score-label">Spring</div><div class="tip-box">{spring_score_tip}</div></div>
+            <div class="score-tile hover-tip"><div class="score-num">{row.get('Active Rank Score', '—')}</div><div class="score-label">Opportunity</div><div class="tip-box">{swing_tip}</div></div>
+            <div class="score-tile hover-tip"><div class="score-num">{wheel_score}</div><div class="score-label">Wheel Score</div><div class="tip-box"><strong>Wheel Candidate v1</strong><br>Company quality + recovery history + current opportunity + event/risk sanity check.<br><br>Options-chain IV/liquidity will be added in the Capital Engine pass.</div></div>
         </div>
+        <div class="capital-card-subhead">Capital Move</div>
+        <div class="recovery-box"><div class="big">{recovery_pct_fmt}</div><div class="small">{avg_days_fmt}</div></div>
+        <div class="capital-move-pill {capital_class}">{_safe_html(capital_move)}</div>
+        <div class="capital-card-subhead">Why Today?</div>
+        <div class="why-list">{why_html}</div>
         <div class="hot-meta">
             {hover_item('Price', f'{current_price} → {potential_price}', price_tip, dot=True)}
             {hover_item('RSI', f'{rsi} · {clean_label(opportunity)}', rsi_tip, dot=True)}
@@ -8131,7 +8353,7 @@ with rank_col_ui:
     ranking_mode = st.selectbox(
         "Choose how to rank the watchlist",
         RANKING_MODES,
-        index=RANKING_MODES.index(st.session_state.get("ranking_mode_selector", "🎯 8% Target Hunter")) if st.session_state.get("ranking_mode_selector") in RANKING_MODES else 0,
+        index=RANKING_MODES.index(st.session_state.get("ranking_mode_selector", "⭐ Highest Conviction")) if st.session_state.get("ranking_mode_selector") in RANKING_MODES else 0,
         key="ranking_mode_selector",
         help="Choose how SwingIt ranks your watchlist without rerunning the scan.",
     )
@@ -8183,10 +8405,25 @@ if active_filter != "All":
             st.session_state.leaderboard_filter = "All"
             st.rerun()
 
-st.markdown("## 🔥 Best Swing Opportunities")
+
+# V17 Capital First filters
+v17_fc1, v17_fc2, v17_fc3 = st.columns([1, 1, 1.2])
+with v17_fc1:
+    min_wheel = st.selectbox("🛞 Min Wheel", [0, 60, 70, 80, 90], index=0, key="v17_min_wheel")
+with v17_fc2:
+    best_entry_filter = st.selectbox("Capital Move", ["All", "Buy Shares", "Sell CSP", "Wait"], index=0, key="v17_capital_move_filter")
+with v17_fc3:
+    st.caption("V17 Capital First: fewer, higher-conviction ideas. Use Highest Conviction + Wheel filters to narrow the field.")
+
+if "Wheel Score" in filtered_df.columns:
+    filtered_df = filtered_df[pd.to_numeric(filtered_df["Wheel Score"], errors="coerce").fillna(0) >= int(min_wheel)].copy()
+if best_entry_filter != "All" and "Capital Move" in filtered_df.columns:
+    filtered_df = filtered_df[filtered_df["Capital Move"].astype(str).str.contains(best_entry_filter, case=False, na=False)].copy()
+
+st.markdown("## ⭐ Today’s Capital Ideas")
 qualified_df = apply_candidate_gate(filtered_df, candidate_gate_mode).reset_index(drop=True)
 st.caption(
-    f"Showing up to 10 **qualified** candidates viewed by **{ranking_mode}**. "
+    f"Showing up to 10 **qualified capital ideas** viewed by **{ranking_mode}**. "
     f"Gate: **{candidate_gate_mode}** · {len(qualified_df)} of {len(filtered_df)} visible tickers qualify."
 )
 top = qualified_df.head(10)
@@ -8224,10 +8461,10 @@ ascending = sort_direction == "Ascending"
 display = filtered_df.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
 compact_cols = [
-    "Ticker", "Favorite", "Active Rank Score", "Setup Quality", "Swing Score", "Rebound Stage", "Stabilization", "4H Trigger", "Spring TF", "Spring", "Spring Score", "Attention", "Volume Trend", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
+    "Ticker", "Favorite", "Active Rank Score", "Wheel Score", "Capital Move", "Capital Verdict", "Setup Quality", "Swing Score", "Rebound Stage", "Stabilization", "4H Trigger", "Spring TF", "Spring", "Spring Score", "Attention", "Volume Trend", "RSI", "Opportunity", "Price", "Potential Swing Price", "Avg Max Bounce", "Avg Days to Max", "History", "Confidence", "Catalyst"
 ]
 research_cols = compact_cols + [
-    "🎯 Target Hunter Score", "⚡ Ready Now Score", "🧠 Confidence Rank Score", "🚀 Upside Rank Score", "😱 Overreaction Rank Score", "🧊 Stabilizing Panic Score", "Target Bounce Score", "Speed Score", "Rebound Stage Score", "Rebound Stage Reason", "Stabilization Score", "Stabilization Reason", "Days Since Panic Low", "Distance From Panic Low %", "New Low Last 3D", "4H Trigger Score", "4H Trigger Reason", "4H Momentum 3-Bar", "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Trend Score", "Volume Trend Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Opportunity Remaining Score", "Opportunity Remaining %", "Move Completed %", "Cycle Low Price", "Cycle Target Price", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
+    "⭐ Highest Conviction Score", "🎯 Target Hunter Score", "⚡ Ready Now Score", "🧠 Confidence Rank Score", "🚀 Upside Rank Score", "😱 Overreaction Rank Score", "🧊 Stabilizing Panic Score", "Target Bounce Score", "Speed Score", "Rebound Stage Score", "Rebound Stage Reason", "Stabilization Score", "Stabilization Reason", "Days Since Panic Low", "Distance From Panic Low %", "New Low Last 3D", "4H Trigger Score", "4H Trigger Reason", "4H Momentum 3-Bar", "Spring Reason", "Squeeze Bars", "Momentum Trend", "Momentum 3-Bar", "Catalyst Score", "Catalyst Reason", "Attention Score", "Volume Trend Score", "Volume Trend Reason", "Volume Ratio", "Volume Score", "Headline", "Successful Swings", "Win Rate", "Risk / Reward", "History Score", "Confidence Score", "Opportunity Score", "Opportunity Remaining Score", "Opportunity Remaining %", "Move Completed %", "Cycle Low Price", "Cycle Target Price", "Days Since RSI <30", "Last RSI <30 Date", "Oversold Since", "Avg Lowest RSI", "Avg Drawdown After Low"
 ]
 show_cols = compact_cols if view_mode == "Compact" else research_cols
 
@@ -8241,6 +8478,8 @@ st.dataframe(
     hide_index=True,
     height=440,
     column_config={
+        "Wheel Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
+        "⭐ Highest Conviction Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Setup Quality": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Swing Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
         "Spring Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
