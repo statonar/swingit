@@ -335,6 +335,175 @@ st.markdown(
     .tip-box {background:#06111f!important;border-color:var(--border)!important;color:#e5eef8!important;}
     .stButton>button {background:#8cff5a!important;color:#06111f!important;border-radius:10px!important;font-weight:900!important;}
 
+
+
+    /* ──────────────────────────────────────────────────────────────
+       V17.2 UI cleanup: sidebar nav, readable dropdowns, no blank top bar
+       ────────────────────────────────────────────────────────────── */
+    header[data-testid="stHeader"],
+    [data-testid="stDecoration"],
+    #MainMenu,
+    footer {
+        display:none!important;
+        visibility:hidden!important;
+        height:0!important;
+    }
+    .stApp { background:#06111f!important; }
+    .block-container {
+        padding-top:1.15rem!important;
+        padding-left:2.1rem!important;
+        padding-right:2.1rem!important;
+        padding-bottom:2.5rem!important;
+        max-width:100%!important;
+    }
+
+    /* Sidebar brand + nav polish */
+    .sidebar-brand {
+        font-size:1.38rem;
+        font-weight:950;
+        letter-spacing:-.035em;
+        color:#f8fafc!important;
+        margin:1.1rem 0 .15rem 0;
+        line-height:1.05;
+    }
+    .sidebar-brand span { color:#8cff5a!important; }
+    .sidebar-subtitle {
+        color:#d9e6f3!important;
+        font-size:.72rem;
+        text-transform:uppercase;
+        letter-spacing:.12em;
+        font-weight:800;
+        margin-bottom:1.25rem;
+    }
+    [data-testid="stSidebar"] {
+        min-width:250px!important;
+        width:250px!important;
+    }
+    [data-testid="stSidebar"] > div:first-child {
+        padding-top:.9rem!important;
+        padding-left:1rem!important;
+        padding-right:.75rem!important;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] {
+        gap:.12rem!important;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label {
+        min-height:38px!important;
+        padding:.45rem .65rem!important;
+        margin:.08rem 0!important;
+        border-radius:10px!important;
+        border:1px solid transparent!important;
+        background:transparent!important;
+        color:#edf5ff!important;
+        font-weight:780!important;
+        transition:all .14s ease!important;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:hover {
+        background:rgba(140,255,90,.08)!important;
+        border-color:rgba(140,255,90,.18)!important;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+        background:linear-gradient(90deg,rgba(140,255,90,.18),rgba(140,255,90,.04))!important;
+        border-left:3px solid #8cff5a!important;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) p,
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) span,
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) div {
+        color:#a7ff72!important;
+        font-weight:900!important;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label p {
+        color:#edf5ff!important;
+        font-size:.92rem!important;
+        line-height:1.1!important;
+        white-space:nowrap!important;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label > div:first-child {
+        display:none!important;
+    }
+    [data-testid="stSidebar"] hr {
+        border-color:rgba(111,139,171,.35)!important;
+        margin:1rem 0!important;
+    }
+    .sidebar-card {
+        background:rgba(9,26,45,.86);
+        border:1px solid rgba(93,122,156,.42);
+        border-radius:13px;
+        padding:13px 14px;
+        margin:13px 0;
+        box-shadow:0 12px 28px rgba(0,0,0,.14);
+    }
+    .sidebar-card .title {
+        color:#cbd7e6!important;
+        text-transform:uppercase;
+        font-size:.68rem;
+        letter-spacing:.06em;
+        font-weight:900;
+        margin-bottom:.45rem;
+    }
+    .sidebar-green { color:#8cff5a!important; font-weight:950; }
+    .dry-gauge {
+        width:100%;
+        height:8px;
+        background:#26384e;
+        border-radius:999px;
+        overflow:hidden;
+        margin:.65rem 0 .75rem 0;
+    }
+    .dry-gauge > div {
+        width:64%;
+        height:100%;
+        background:linear-gradient(90deg,#8cff5a,#56d86b);
+        border-radius:999px;
+    }
+
+    /* Streamlit input/select readability. White fields need dark text. */
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="textarea"] textarea {
+        background:#ffffff!important;
+        color:#0f172a!important;
+        border:1px solid #d9e2ef!important;
+        border-radius:11px!important;
+        box-shadow:none!important;
+    }
+    div[data-baseweb="select"] span,
+    div[data-baseweb="select"] div,
+    div[data-baseweb="select"] input,
+    div[data-baseweb="input"] input,
+    div[data-baseweb="textarea"] textarea {
+        color:#0f172a!important;
+        -webkit-text-fill-color:#0f172a!important;
+        font-weight:700!important;
+    }
+    div[data-baseweb="select"] svg {
+        fill:#0f172a!important;
+        color:#0f172a!important;
+    }
+    [data-baseweb="popover"], [data-baseweb="menu"], ul[role="listbox"] {
+        background:#ffffff!important;
+        color:#0f172a!important;
+    }
+    [role="option"], [role="option"] span, [role="option"] div {
+        color:#0f172a!important;
+        -webkit-text-fill-color:#0f172a!important;
+    }
+    [role="option"]:hover {
+        background:#eaf2ff!important;
+    }
+
+    /* Reduce excess vertical whitespace from section separators. */
+    div[data-testid="stVerticalBlock"] > div:has(> hr) {
+        margin-top:.35rem!important;
+        margin-bottom:.35rem!important;
+    }
+    hr { margin:.85rem 0!important; }
+
+    /* Cleaner pills/buttons */
+    .stButton>button {
+        min-height:38px!important;
+        box-shadow:0 8px 18px rgba(140,255,90,.15)!important;
+    }
 </style>
 """,
     unsafe_allow_html=True,
@@ -566,14 +735,10 @@ elif universe == "📂 CSV upload":
         key="top_csv_upload",
     )
 
-st.markdown("---")
-
 # Single-user mode: Favorites and Morning Report storage are app-level.
 ACTIVE_PROFILE = "Amber"
 PROFILE_DIR = APP_DATA_DIR
 os.makedirs(PROFILE_DIR, exist_ok=True)
-
-st.markdown("---")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
