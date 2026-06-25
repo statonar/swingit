@@ -1,5 +1,5 @@
 """
-SwingIt V16.0 — Stock Verifier
+SwingIt V16.1 — Stock Verifier + Catalyst Timeline
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -6460,6 +6460,141 @@ def _get_yf_info_and_news(ticker: str):
     return info, news_rows
 
 
+
+
+def _normalize_event_date(value):
+    """Return a date object from common yfinance date formats."""
+    try:
+        if value is None:
+            return None
+        if isinstance(value, (datetime.date, datetime.datetime, pd.Timestamp)):
+            return pd.to_datetime(value).date()
+        if isinstance(value, (int, float)) and value > 0:
+            # Some feeds return Unix seconds.
+            return pd.to_datetime(value, unit="s", errors="coerce").date()
+        dt = pd.to_datetime(value, errors="coerce")
+        if pd.isna(dt):
+            return None
+        return dt.date()
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_important_dates(ticker: str):
+    """Best-effort event calendar from yfinance.
+
+    Returns normalized upcoming events. This intentionally uses multiple fields
+    because yfinance varies by ticker and version.
+    """
+    events = []
+    today = datetime.date.today()
+    try:
+        tk = yf.Ticker(ticker)
+
+        # Earnings dates from info/calendar.
+        info = {}
+        try:
+            info = tk.info or {}
+        except Exception:
+            info = {}
+
+        def add_event(date_val, event, importance="Medium", impact="Review before trading", source="Yahoo Finance"):
+            d = _normalize_event_date(date_val)
+            if not d:
+                return
+            # Keep recent/past events only if very close; otherwise focus upcoming.
+            days = (d - today).days
+            if days < -3 or days > 180:
+                return
+            events.append({
+                "date": d,
+                "days": days,
+                "event": event,
+                "importance": importance,
+                "impact": impact,
+                "source": source,
+            })
+
+        # Info fields for earnings / dividend / ex-dividend.
+        for key in ["earningsDate", "earningsTimestamp", "earningsTimestampStart", "earningsTimestampEnd"]:
+            val = info.get(key)
+            if isinstance(val, (list, tuple)):
+                for v in val:
+                    add_event(v, "Earnings", "High", "Major event risk. Avoid selling options across this date unless intentional.")
+            else:
+                add_event(val, "Earnings", "High", "Major event risk. Avoid selling options across this date unless intentional.")
+        add_event(info.get("exDividendDate"), "Ex-dividend date", "Medium", "Can affect covered calls and early assignment risk.")
+        add_event(info.get("dividendDate"), "Dividend pay date", "Low", "Cash dividend payment date if you hold shares on record.")
+
+        # Calendar object can be dict or dataframe.
+        try:
+            cal = tk.calendar
+            if isinstance(cal, dict):
+                for key, val in cal.items():
+                    lk = str(key).lower()
+                    if "earn" in lk:
+                        if isinstance(val, (list, tuple, pd.Series)):
+                            for v in list(val):
+                                add_event(v, "Earnings", "High", "Major event risk. Option premium may be elevated for a reason.")
+                        else:
+                            add_event(val, "Earnings", "High", "Major event risk. Option premium may be elevated for a reason.")
+                    elif "ex" in lk and "div" in lk:
+                        add_event(val, "Ex-dividend date", "Medium", "Covered calls can face early assignment if deep ITM.")
+                    elif "div" in lk:
+                        add_event(val, "Dividend date", "Low", "Dividend-related event.")
+            elif hasattr(cal, "empty") and not cal.empty:
+                # Usually columns are event labels and first row values.
+                for col in cal.columns:
+                    for val in cal[col].dropna().head(2).tolist():
+                        lk = str(col).lower()
+                        if "earn" in lk:
+                            add_event(val, "Earnings", "High", "Major event risk. Option premium may be elevated for a reason.")
+                        elif "ex" in lk and "div" in lk:
+                            add_event(val, "Ex-dividend date", "Medium", "Covered calls can face early assignment if deep ITM.")
+                        elif "div" in lk:
+                            add_event(val, "Dividend date", "Low", "Dividend-related event.")
+        except Exception:
+            pass
+
+        # Last/next dividend inferred from dividend history is less reliable, but helps if info is empty.
+        try:
+            divs = tk.dividends
+            if divs is not None and not divs.empty:
+                last_div_date = pd.to_datetime(divs.index[-1]).date()
+                # Estimate next quarterly dividend if the company has paid recently and no upcoming ex-date found.
+                if (today - last_div_date).days <= 120:
+                    has_ex = any(e["event"] == "Ex-dividend date" for e in events)
+                    if not has_ex:
+                        est = last_div_date + datetime.timedelta(days=91)
+                        if 0 <= (est - today).days <= 120:
+                            add_event(est, "Estimated next ex-dividend window", "Low", "Estimated from recent dividend cadence; verify before trading options.", "Estimated")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Deduplicate by date/event.
+    dedup = {}
+    for e in events:
+        key = (e["date"], e["event"])
+        if key not in dedup:
+            dedup[key] = e
+    return sorted(dedup.values(), key=lambda x: (x["date"], x["event"]))
+
+
+def _event_risk_summary(events):
+    upcoming = [e for e in (events or []) if e.get("days", 999) >= 0]
+    if not upcoming:
+        return "🟢 Low", "No major upcoming earnings/dividend events found in the data feed."
+    high_soon = [e for e in upcoming if e.get("importance") == "High" and e.get("days", 999) <= 14]
+    med_soon = [e for e in upcoming if e.get("importance") in ["High", "Medium"] and e.get("days", 999) <= 21]
+    if high_soon:
+        return "🔴 High", "Earnings or another high-impact event is close enough to affect entries, exits, and option premium."
+    if med_soon:
+        return "🟡 Medium", "A dividend or scheduled event is close enough to consider before selling options."
+    return "🟢 Low", "No high-impact scheduled events are close to the planned swing window."
+
 def _options_expectations(ticker: str, price: float | None, target_price: float | None = None):
     out = {"iv": None, "expiry": None, "expected_move_pct": None, "expected_move_dollars": None, "target_probability_note": "Options data unavailable."}
     if not price:
@@ -6515,6 +6650,8 @@ def compute_stock_verifier(ticker: str, profit_target: int = 8, bounce_days: int
     if not candidate:
         return None
     info, news_rows = _get_yf_info_and_news(ticker)
+    important_dates = _get_important_dates(ticker)
+    event_risk, event_risk_note = _event_risk_summary(important_dates)
     price = _safe_float(candidate.get("price"), None)
     target = _safe_float(candidate.get("potential_sell_price"), None)
     options = _options_expectations(ticker, price, target)
@@ -6540,6 +6677,9 @@ def compute_stock_verifier(ticker: str, profit_target: int = 8, bounce_days: int
         "candidate": candidate,
         "info": info,
         "news_rows": news_rows,
+        "important_dates": important_dates,
+        "event_risk": event_risk,
+        "event_risk_note": event_risk_note,
         "options": options,
         "buy_zone": buy_zone,
         "trade_type": trade_type,
@@ -6581,11 +6721,12 @@ def render_stock_verifier_workspace():
     opt = result.get("options", {})
 
     st.markdown(f"### {t} — {info.get('shortName') or info.get('longName') or 'Stock'}")
-    top1, top2, top3, top4 = st.columns(4)
+    top1, top2, top3, top4, top5 = st.columns(5)
     top1.metric("Would I Buy Today?", result.get("verdict", "—"))
     top2.metric("Amber Fit", f"{result.get('amber_fit', 0)}/100")
     top3.metric("Trade Type", result.get("trade_type", "—"))
-    top4.metric("Current", _fmt_money(price))
+    top4.metric("Event Risk", result.get("event_risk", "—"))
+    top5.metric("Current", _fmt_money(price))
 
     with st.container(border=True):
         st.markdown("#### 🎯 Buy Zone")
@@ -6597,6 +6738,27 @@ def render_stock_verifier_workspace():
         st.caption(bz.get("reason", ""))
         if target:
             st.caption(f"Recovery target: {_fmt_money(target)} · Opportunity remaining: {_fmt_pct(c.get('opportunity_remaining_pct'))} · Suggested risk stop: {_fmt_money(result.get('stop'))}")
+
+    with st.container(border=True):
+        st.markdown("#### 📅 Catalyst Timeline")
+        st.caption(result.get("event_risk_note", ""))
+        ev = result.get("important_dates") or []
+        if ev:
+            event_rows = []
+            for e in ev[:8]:
+                d = e.get("date")
+                days = e.get("days")
+                when = "Today" if days == 0 else (f"In {days} days" if days and days > 0 else (f"{abs(days)} days ago" if days and days < 0 else "—"))
+                event_rows.append({
+                    "Date": d.strftime("%b %-d, %Y") if hasattr(d, "strftime") else str(d),
+                    "When": when,
+                    "Event": e.get("event", "—"),
+                    "Importance": e.get("importance", "—"),
+                    "Trading note": e.get("impact", "—"),
+                })
+            st.dataframe(pd.DataFrame(event_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No upcoming earnings or dividend dates were returned by the data provider. Verify manually before selling options or holding through an event.")
 
     with st.container(border=True):
         st.markdown("#### 📰 Latest News & Catalyst Read")
@@ -6651,6 +6813,10 @@ def render_stock_verifier_workspace():
                 warnings.append("Longer-term trend health is weak.")
             if _safe_float(c.get("catalyst_score"), 0) < 25:
                 warnings.append("No strong catalyst detected yet.")
+            if str(result.get("event_risk", "")).startswith("🔴"):
+                warnings.append("Scheduled event risk is high. Earnings may explain juicy premium and can change the setup overnight.")
+            elif str(result.get("event_risk", "")).startswith("🟡"):
+                warnings.append("A dividend or scheduled event is close enough to consider before selling options.")
             if not warnings:
                 warnings.append("No major red flags detected by the verifier. Still confirm live chart and news before trading.")
             for w in warnings:
