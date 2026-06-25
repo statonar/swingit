@@ -1,5 +1,5 @@
 """
-SwingIt V16.1 — Stock Verifier + Catalyst Timeline
+SwingIt V16.2 — Stock Verifier + Options Intelligence
 Finds 1–4 week swing-trade watchlist candidates by ranking stocks on:
 - Current RSI opportunity
 - Historical RSI <30 rebound behavior
@@ -32,7 +32,7 @@ import yfinance as yf
 # App setup + softer theme
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SwingIt V16",
+    page_title="SwingIt V16.2",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -6641,8 +6641,263 @@ def _options_expectations(ticker: str, price: float | None, target_price: float 
     return out
 
 
+
+def _clamp(v, lo, hi):
+    try:
+        return max(lo, min(hi, float(v)))
+    except Exception:
+        return lo
+
+
+def _prob_label_from_delta(delta_abs):
+    if delta_abs is None:
+        return "—"
+    try:
+        d = abs(float(delta_abs))
+        if d <= 0.18:
+            return "Low"
+        if d <= 0.30:
+            return "Medium-Low"
+        if d <= 0.45:
+            return "Medium"
+        return "High"
+    except Exception:
+        return "—"
+
+
+def _spread_score(bid, ask):
+    bid = _safe_float(bid, None)
+    ask = _safe_float(ask, None)
+    if bid is None or ask is None or ask <= 0:
+        return 0
+    mid = (bid + ask) / 2
+    if mid <= 0:
+        return 0
+    spread_pct = (ask - bid) / mid
+    if spread_pct <= 0.08:
+        return 100
+    if spread_pct <= 0.15:
+        return 80
+    if spread_pct <= 0.25:
+        return 60
+    if spread_pct <= 0.40:
+        return 35
+    return 10
+
+
+def _annualized_return(premium, cash_required, dte):
+    try:
+        if premium is None or cash_required is None or cash_required <= 0 or dte <= 0:
+            return None
+        return (float(premium) / float(cash_required)) * (365.0 / float(dte)) * 100.0
+    except Exception:
+        return None
+
+
+def _raw_return(premium, cash_required):
+    try:
+        if premium is None or cash_required is None or cash_required <= 0:
+            return None
+        return float(premium) / float(cash_required) * 100.0
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=300, show_spinner=False)
-def compute_stock_verifier(ticker: str, profit_target: int = 8, bounce_days: int = 30, include_news_lookup: bool = True):
+def _options_intelligence(ticker: str, price: float | None, target_price: float | None = None, cost_basis: float | None = None, tax_rate_pct: float = 25.0, max_dte: int = 21):
+    """Best-effort option opportunities from yfinance.
+
+    The goal is not to be a pro options chain; it is to convert the chain into
+    Amber-style decisions: actual dollars, effective entry, assignment risk,
+    yield, and premium traps.
+    """
+    out = {
+        "csp_rows": [],
+        "cc_rows": [],
+        "best_csp": None,
+        "best_cc": None,
+        "warning": "",
+    }
+    if not price:
+        out["warning"] = "Options data unavailable because price is missing."
+        return out
+    try:
+        tk = yf.Ticker(ticker)
+        expiries = list(tk.options or [])
+        if not expiries:
+            out["warning"] = "No listed options returned by the data provider."
+            return out
+
+        today = datetime.date.today()
+        usable = []
+        for exp in expiries[:8]:
+            try:
+                exp_date = pd.to_datetime(exp).date()
+                dte = (exp_date - today).days
+                if 1 <= dte <= int(max_dte):
+                    usable.append((exp, exp_date, dte))
+            except Exception:
+                continue
+        if not usable:
+            # Fall back to the nearest expiration if the chosen DTE window is empty.
+            exp = expiries[0]
+            exp_date = pd.to_datetime(exp).date()
+            usable = [(exp, exp_date, max((exp_date - today).days, 1))]
+
+        all_puts = []
+        all_calls = []
+        for exp, exp_date, dte in usable[:4]:
+            try:
+                chain = tk.option_chain(exp)
+                puts = chain.puts.copy() if chain.puts is not None else pd.DataFrame()
+                calls = chain.calls.copy() if chain.calls is not None else pd.DataFrame()
+            except Exception:
+                continue
+
+            if not puts.empty:
+                for _, row in puts.iterrows():
+                    strike = _safe_float(row.get("strike"), None)
+                    bid = _safe_float(row.get("bid"), 0)
+                    ask = _safe_float(row.get("ask"), 0)
+                    delta = _safe_float(row.get("delta"), None)
+                    iv = _safe_float(row.get("impliedVolatility"), None)
+                    oi = _safe_float(row.get("openInterest"), 0)
+                    vol = _safe_float(row.get("volume"), 0)
+                    if strike is None or bid <= 0:
+                        continue
+                    # Prefer puts at/below current price and not wildly far away.
+                    if strike > price * 1.03 or strike < price * 0.70:
+                        continue
+                    premium_dollars = bid * 100
+                    cash_required = strike * 100
+                    effective_cost = strike - bid
+                    discount_pct = (price - effective_cost) / price * 100 if price else None
+                    raw_ret = _raw_return(premium_dollars, cash_required)
+                    annual_ret = _annualized_return(premium_dollars, cash_required, dte)
+                    spread = _spread_score(bid, ask)
+                    delta_abs = abs(delta) if delta is not None else None
+                    # If greeks are missing, estimate risk by moneyness.
+                    if delta_abs is None:
+                        moneyness = strike / price
+                        delta_abs = _clamp(0.50 - (1 - moneyness) * 1.8, 0.05, 0.65)
+                    delta_score = 100 - abs(delta_abs - 0.24) * 230
+                    buy_zone_score = 60
+                    if target_price and effective_cost:
+                        # Favor entries below current and with reasonable upside to target.
+                        upside_to_target = (target_price - effective_cost) / effective_cost * 100 if effective_cost > 0 else 0
+                        buy_zone_score = _clamp(upside_to_target * 6, 10, 100)
+                    liquidity_score = _clamp((oi or 0) / 50 * 50 + (vol or 0) / 25 * 50, 0, 100)
+                    if liquidity_score == 0:
+                        liquidity_score = 35 if spread >= 60 else 15
+                    premium_score = _clamp((raw_ret or 0) * 35, 0, 100)
+                    score = round(_clamp((delta_score * 0.24) + (buy_zone_score * 0.24) + (premium_score * 0.18) + (spread * 0.18) + (liquidity_score * 0.16), 0, 100), 0)
+                    all_puts.append({
+                        "Expiry": exp,
+                        "DTE": dte,
+                        "Strike": strike,
+                        "Bid": bid,
+                        "Ask": ask,
+                        "Premium $": round(premium_dollars, 0),
+                        "After-tax $": round(premium_dollars * (1 - (tax_rate_pct or 0) / 100.0), 0),
+                        "Cash needed": round(cash_required, 0),
+                        "Effective buy": round(effective_cost, 2),
+                        "Discount": round(discount_pct, 1) if discount_pct is not None else None,
+                        "Delta": round(-delta_abs, 2),
+                        "Assignment risk": _prob_label_from_delta(delta_abs),
+                        "Return %": round(raw_ret, 2) if raw_ret is not None else None,
+                        "Annualized %": round(annual_ret, 1) if annual_ret is not None else None,
+                        "IV": round(iv * 100, 1) if iv else None,
+                        "OI": int(oi or 0),
+                        "Volume": int(vol or 0),
+                        "Spread score": int(round(spread)),
+                        "Amber rating": int(score),
+                    })
+
+            if not calls.empty:
+                for _, row in calls.iterrows():
+                    strike = _safe_float(row.get("strike"), None)
+                    bid = _safe_float(row.get("bid"), 0)
+                    ask = _safe_float(row.get("ask"), 0)
+                    delta = _safe_float(row.get("delta"), None)
+                    iv = _safe_float(row.get("impliedVolatility"), None)
+                    oi = _safe_float(row.get("openInterest"), 0)
+                    vol = _safe_float(row.get("volume"), 0)
+                    if strike is None or bid <= 0:
+                        continue
+                    # Covered calls should generally be at/above current price.
+                    if strike < price * 0.98 or strike > price * 1.35:
+                        continue
+                    premium_dollars = bid * 100
+                    delta_abs = abs(delta) if delta is not None else None
+                    if delta_abs is None:
+                        moneyness = strike / price
+                        delta_abs = _clamp(0.50 - (moneyness - 1) * 1.6, 0.05, 0.65)
+                    spread = _spread_score(bid, ask)
+                    max_profit = None
+                    if cost_basis and cost_basis > 0:
+                        max_profit = (strike - cost_basis) * 100 + premium_dollars
+                    target_alignment = 50
+                    if target_price:
+                        # Prefer calls near/above target, not below it.
+                        if strike >= target_price:
+                            target_alignment = 90
+                        elif strike >= target_price * 0.97:
+                            target_alignment = 75
+                        else:
+                            target_alignment = 35
+                    delta_score = 100 - abs(delta_abs - 0.22) * 220
+                    premium_score = _clamp((premium_dollars / max(price * 100, 1)) * 100 * 30, 0, 100)
+                    liquidity_score = _clamp((oi or 0) / 50 * 50 + (vol or 0) / 25 * 50, 0, 100)
+                    if liquidity_score == 0:
+                        liquidity_score = 35 if spread >= 60 else 15
+                    score = round(_clamp((target_alignment * 0.34) + (delta_score * 0.24) + (premium_score * 0.16) + (spread * 0.14) + (liquidity_score * 0.12), 0, 100), 0)
+                    all_calls.append({
+                        "Expiry": exp,
+                        "DTE": dte,
+                        "Strike": strike,
+                        "Bid": bid,
+                        "Ask": ask,
+                        "Premium $": round(premium_dollars, 0),
+                        "After-tax $": round(premium_dollars * (1 - (tax_rate_pct or 0) / 100.0), 0),
+                        "Max profit $": round(max_profit, 0) if max_profit is not None else None,
+                        "Delta": round(delta_abs, 2),
+                        "Called-away risk": _prob_label_from_delta(delta_abs),
+                        "IV": round(iv * 100, 1) if iv else None,
+                        "OI": int(oi or 0),
+                        "Volume": int(vol or 0),
+                        "Spread score": int(round(spread)),
+                        "Amber rating": int(score),
+                    })
+
+        all_puts = sorted(all_puts, key=lambda x: (x.get("Amber rating", 0), x.get("Premium $", 0)), reverse=True)
+        all_calls = sorted(all_calls, key=lambda x: (x.get("Amber rating", 0), x.get("Premium $", 0)), reverse=True)
+        out["csp_rows"] = all_puts[:8]
+        out["cc_rows"] = all_calls[:8]
+        out["best_csp"] = all_puts[0] if all_puts else None
+        out["best_cc"] = all_calls[0] if all_calls else None
+        if not all_puts and not all_calls:
+            out["warning"] = "Options chain returned, but no contracts matched the safety filters."
+    except Exception as e:
+        out["warning"] = f"Options intelligence unavailable: {e}"
+    return out
+
+
+def _premium_warning_text(options_summary: dict, event_risk: str):
+    warnings = []
+    iv = _safe_float(options_summary.get("iv"), None) if options_summary else None
+    if iv and iv >= 70:
+        warnings.append("Premiums are expensive because IV is very high. The market expects a large move.")
+    if str(event_risk).startswith("🔴"):
+        warnings.append("A high-impact event is close. Do not treat juicy premium as free money.")
+    if str(event_risk).startswith("🟡"):
+        warnings.append("A scheduled event/dividend is close enough to affect option pricing or assignment risk.")
+    if not warnings:
+        warnings.append("No major option-specific warning detected, but confirm live bid/ask spreads before placing any order.")
+    return warnings
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def compute_stock_verifier(ticker: str, profit_target: int = 8, bounce_days: int = 30, include_news_lookup: bool = True, cost_basis: float = 0.0, tax_rate_pct: float = 25.0, max_dte: int = 21):
     ticker = (ticker or "").strip().upper()
     if not ticker:
         return None
@@ -6655,6 +6910,7 @@ def compute_stock_verifier(ticker: str, profit_target: int = 8, bounce_days: int
     price = _safe_float(candidate.get("price"), None)
     target = _safe_float(candidate.get("potential_sell_price"), None)
     options = _options_expectations(ticker, price, target)
+    options_intel = _options_intelligence(ticker, price, target, cost_basis, tax_rate_pct, max_dte)
     buy_zone = _calculate_buy_zone(candidate, candidate.get("df"), options.get("expected_move_pct"))
     trade_type = _verifier_trade_type(candidate, info)
     verdict, amber_fit = _verifier_buy_verdict(candidate, trade_type)
@@ -6681,6 +6937,7 @@ def compute_stock_verifier(ticker: str, profit_target: int = 8, bounce_days: int
         "event_risk": event_risk,
         "event_risk_note": event_risk_note,
         "options": options,
+        "options_intel": options_intel,
         "buy_zone": buy_zone,
         "trade_type": trade_type,
         "verdict": verdict,
@@ -6701,10 +6958,20 @@ def render_stock_verifier_workspace():
             goal = st.selectbox("Recovery target", [5, 8, 10, 12, 15, 20], index=1, key="verifier_goal")
         with c3:
             go = st.button("🔎 Verify Stock", use_container_width=True, key="verifier_run_button")
+        with st.expander("Options settings", expanded=False):
+            o1, o2, o3 = st.columns(3)
+            with o1:
+                owned_shares = st.number_input("Shares owned", min_value=0, max_value=10000, value=int(st.session_state.get("verifier_owned_shares", 0)), step=100, key="verifier_owned_shares")
+                cost_basis = st.number_input("Cost basis (for covered calls)", min_value=0.0, value=float(st.session_state.get("verifier_cost_basis", 0.0)), step=1.0, key="verifier_cost_basis")
+            with o2:
+                tax_rate = st.number_input("Estimated short-term tax rate %", min_value=0.0, max_value=60.0, value=float(st.session_state.get("verifier_tax_rate", 25.0)), step=1.0, key="verifier_tax_rate")
+                max_dte = st.selectbox("Max DTE to scan", [7, 14, 21, 30, 45], index=2, key="verifier_max_dte")
+            with o3:
+                st.caption("Used for Premium Sweet Spot, after-tax estimates, and covered-call max-profit math.")
     if go and ticker:
         st.session_state.verifier_last_ticker = ticker
         with st.spinner(f"Verifying {ticker}…"):
-            st.session_state.verifier_result = compute_stock_verifier(ticker, int(goal), 30, True)
+            st.session_state.verifier_result = compute_stock_verifier(ticker, int(goal), 30, True, float(cost_basis or 0), float(tax_rate or 25), int(max_dte or 21))
     result = st.session_state.get("verifier_result")
     if not result:
         with st.container(border=True):
@@ -6802,6 +7069,87 @@ def render_stock_verifier_workspace():
             o2.metric("Expected Move", f"±{_fmt_money(opt.get('expected_move_dollars'))}" if opt.get("expected_move_dollars") else "—")
             st.caption(f"Expiry used: {opt.get('expiry') or '—'} · Expected move: ±{_fmt_pct(opt.get('expected_move_pct'))}")
             st.write(opt.get("target_probability_note", "Options data unavailable."))
+
+    with st.container(border=True):
+        st.markdown("#### 💰 Options Intelligence")
+        st.caption("Premium Sweet Spot converts the option chain into actual dollars, effective buy prices, assignment risk, and after-tax estimates.")
+        oi = result.get("options_intel") or {}
+        for w in _premium_warning_text(opt, result.get("event_risk", "")):
+            st.markdown(f"- ⚠️ {w}")
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            best = oi.get("best_csp")
+            st.markdown("##### Cash-Secured Put Sweet Spot")
+            if best:
+                a, b, ccol, d = st.columns(4)
+                a.metric("Best put", f"{best['Strike']:g}P")
+                b.metric("Premium", _fmt_money(best.get("Premium $")))
+                ccol.metric("Effective buy", _fmt_money(best.get("Effective buy")))
+                d.metric("Amber rating", f"{best.get('Amber rating', 0)}/100")
+                st.caption(f"DTE {best.get('DTE')} · Assignment risk {best.get('Assignment risk')} · Delta {best.get('Delta')} · After-tax premium ≈ {_fmt_money(best.get('After-tax $'))}")
+            else:
+                st.info(oi.get("warning") or "No put candidates matched the Premium Sweet Spot filters.")
+        with pc2:
+            bestc = oi.get("best_cc")
+            st.markdown("##### Covered Call Sweet Spot")
+            owned = int(st.session_state.get("verifier_owned_shares", 0) or 0)
+            if owned >= 100 and bestc:
+                a, b, ccol, d = st.columns(4)
+                a.metric("Best call", f"{bestc['Strike']:g}C")
+                b.metric("Premium", _fmt_money(bestc.get("Premium $")))
+                ccol.metric("Max profit", _fmt_money(bestc.get("Max profit $")))
+                d.metric("Amber rating", f"{bestc.get('Amber rating', 0)}/100")
+                st.caption(f"DTE {bestc.get('DTE')} · Called-away risk {bestc.get('Called-away risk')} · Delta {bestc.get('Delta')} · After-tax premium ≈ {_fmt_money(bestc.get('After-tax $'))}")
+            else:
+                st.info("Enter shares owned and cost basis in Options settings to score covered calls.")
+
+        tabs = st.tabs(["Put candidates", "Covered call candidates", "Assignment simulator"])
+        with tabs[0]:
+            rows = oi.get("csp_rows") or []
+            if rows:
+                put_df = pd.DataFrame(rows)
+                display_cols = ["Expiry", "DTE", "Strike", "Premium $", "After-tax $", "Cash needed", "Effective buy", "Discount", "Delta", "Assignment risk", "Return %", "Annualized %", "IV", "OI", "Volume", "Spread score", "Amber rating"]
+                st.dataframe(put_df[[c for c in display_cols if c in put_df.columns]], use_container_width=True, hide_index=True)
+            else:
+                st.info("No cash-secured put candidates found in the selected DTE range.")
+        with tabs[1]:
+            rows = oi.get("cc_rows") or []
+            if rows:
+                call_df = pd.DataFrame(rows)
+                display_cols = ["Expiry", "DTE", "Strike", "Premium $", "After-tax $", "Max profit $", "Delta", "Called-away risk", "IV", "OI", "Volume", "Spread score", "Amber rating"]
+                st.dataframe(call_df[[c for c in display_cols if c in call_df.columns]], use_container_width=True, hide_index=True)
+            else:
+                st.info("No covered-call candidates found in the selected DTE range.")
+        with tabs[2]:
+            best = oi.get("best_csp")
+            if best:
+                hist_gain = _safe_float(c.get("avg_gain_pct"), None) or _safe_float(c.get("avg_max_bounce_pct"), None) or _safe_float(c.get("avg_gain_to_target_pct"), None) or float(st.session_state.get("verifier_goal", 8) or 8)
+                hist_days = _safe_float(c.get("avg_days_to_recover"), None) or _safe_float(c.get("avg_days_to_max"), None) or 18
+                eff = _safe_float(best.get("Effective buy"), None)
+                prem = _safe_float(best.get("Premium $"), 0)
+                potential_swing = eff * 100 * (hist_gain / 100.0) if eff else None
+                total_potential = (potential_swing or 0) + prem
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("If assigned cost", _fmt_money(eff))
+                s2.metric("Premium kept", _fmt_money(prem))
+                s3.metric("Avg recovery", _fmt_pct(hist_gain))
+                s4.metric("Est. total potential", _fmt_money(total_potential))
+                st.caption(f"Historical/goal-based estimate: average recovery around {int(hist_days)} days. This is a planning estimate, not a guarantee.")
+            else:
+                st.info("Select a viable put candidate to simulate assignment.")
+
+        with st.container(border=True):
+            st.markdown("##### 🤖 AI Premium Plan")
+            best = oi.get("best_csp")
+            bestc = oi.get("best_cc")
+            if best:
+                st.write(f"For a new entry, the strongest put candidate is the **{best.get('Expiry')} {t} {best.get('Strike'):g}P**. It pays about **{_fmt_money(best.get('Premium $'))}**, creates an effective buy price near **{_fmt_money(best.get('Effective buy'))}**, and carries **{best.get('Assignment risk')}** assignment risk.")
+            if owned >= 100 and bestc:
+                st.write(f"For owned shares, the strongest covered-call candidate is the **{bestc.get('Expiry')} {t} {bestc.get('Strike'):g}C**. It pays about **{_fmt_money(bestc.get('Premium $'))}** and caps the exit near your selected strike.")
+            if not best and not bestc:
+                st.write("No strong options plan was found. Passing is a valid capital allocation decision.")
+
+    with col_right:
         with st.container(border=True):
             st.markdown("#### ⚠️ Why Not?")
             warnings = []
