@@ -400,8 +400,8 @@ with st.container(border=True):
     with top_title_col:
         st.markdown(
             """
-            <div class="terminal-title">🔥 SwingIt V16</div>
-            <div class="terminal-subtitle">Command Center + one-ticker Stock Verifier.</div>
+            <div class="terminal-title">🔥 SwingIt V17</div>
+            <div class="terminal-subtitle">Command Center + Stock Verifier + Capital Engine.</div>
             """,
             unsafe_allow_html=True,
         )
@@ -410,13 +410,13 @@ with st.container(border=True):
         st.markdown("<div class='toolbar-label'>Workspace</div>", unsafe_allow_html=True)
         workspace = st.selectbox(
             "Workspace",
-            ["⭐ Command Center", "🔎 Stock Verifier", "⚡ Entry Hunter", "☀️ Morning Drop Afternoon Pop", "🔥 Scanner", "👑 My Portfolio"],
+            ["⭐ Command Center", "🔎 Stock Verifier", "💰 Capital Engine", "⚡ Entry Hunter", "☀️ Morning Drop Afternoon Pop", "🔥 Scanner", "👑 My Portfolio"],
             index=0,
             label_visibility="collapsed",
             key="workspace_selector",
             help="Command Center is the clean discovery view. Specialist workspaces are still available.",
         )
-        st.markdown("<div class='toolbar-help'>Discover, verify, enter, pop, manage</div>", unsafe_allow_html=True)
+        st.markdown("<div class='toolbar-help'>Discover, verify, deploy, enter, manage</div>", unsafe_allow_html=True)
 
     with top_universe_col:
         st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
@@ -512,8 +512,8 @@ with st.container(border=True):
 
     with top_run_col:
         st.markdown("<div class='toolbar-label'>&nbsp;</div>", unsafe_allow_html=True)
-        run_label = "⭐ Build Command Center" if st.session_state.get("workspace_selector") == "⭐ Command Center" else ("🔎 Verify Ticker" if st.session_state.get("workspace_selector") == "🔎 Stock Verifier" else ("⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else ("☀️ Run 11AM Pop Scan" if st.session_state.get("workspace_selector") == "☀️ Morning Drop Afternoon Pop" else "🚀 Run Swing Scan")))
-        run = st.button(run_label, use_container_width=True, disabled=(st.session_state.get("workspace_selector") in ["👑 My Portfolio", "🔎 Stock Verifier"]))
+        run_label = "⭐ Build Command Center" if st.session_state.get("workspace_selector") == "⭐ Command Center" else ("🔎 Verify Ticker" if st.session_state.get("workspace_selector") == "🔎 Stock Verifier" else ("💰 Open Capital Engine" if st.session_state.get("workspace_selector") == "💰 Capital Engine" else ("⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else ("☀️ Run 11AM Pop Scan" if st.session_state.get("workspace_selector") == "☀️ Morning Drop Afternoon Pop" else "🚀 Run Swing Scan"))))
+        run = st.button(run_label, use_container_width=True, disabled=(st.session_state.get("workspace_selector") in ["👑 My Portfolio", "🔎 Stock Verifier", "💰 Capital Engine"]))
         st.markdown("<div class='run-note'>Use ToS for entries/exits.</div>", unsafe_allow_html=True)
 
 if universe == "Custom list":
@@ -7184,10 +7184,346 @@ def render_stock_verifier_workspace():
             cols[i].metric(label, "✓" if ok else "—")
 
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# V17 Capital Engine — premium + capital allocation workspace
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _capital_assignment_sim(best_put: dict | None, candidate: dict | None, goal_pct: float = 8.0):
+    if not best_put:
+        return {}
+    eff = _safe_float(best_put.get("Effective buy"), None)
+    prem = _safe_float(best_put.get("Premium $"), 0)
+    if eff is None:
+        return {}
+    hist_gain = None
+    hist_days = None
+    if candidate:
+        hist_gain = _safe_float(candidate.get("avg_gain_pct"), None) or _safe_float(candidate.get("avg_max_bounce_pct"), None) or _safe_float(candidate.get("avg_gain_to_target_pct"), None)
+        hist_days = _safe_float(candidate.get("avg_days_to_recover"), None) or _safe_float(candidate.get("avg_days_to_max"), None)
+    if not hist_gain:
+        hist_gain = goal_pct
+    if not hist_days:
+        hist_days = 18
+    potential_swing = eff * 100 * (hist_gain / 100.0)
+    return {
+        "effective_cost": round(eff, 2),
+        "premium": round(prem, 0),
+        "avg_recovery_pct": round(hist_gain, 1),
+        "avg_days": int(round(hist_days)),
+        "potential_swing": round(potential_swing, 0),
+        "total_opportunity": round(potential_swing + prem, 0),
+    }
+
+
+def _capital_score(candidate: dict | None, best_put: dict | None, event_risk: str = ""):
+    if not best_put:
+        return 0
+    amber = _safe_float(best_put.get("Amber rating"), 0)
+    premium = _safe_float(best_put.get("Return %"), 0)
+    spread = _safe_float(best_put.get("Spread score"), 0)
+    ann = _safe_float(best_put.get("Annualized %"), 0)
+    trend = _safe_float(candidate.get("trend_score"), 55) if candidate else 55
+    setup = _safe_float(candidate.get("setup_quality"), 55) if candidate else 55
+    # Cap annualized return contribution because gigantic IV/penny-stock premium can be a trap.
+    ann_score = _clamp(ann, 0, 60) / 60 * 100
+    prem_score = _clamp(premium * 22, 0, 100)
+    score = (trend * 0.24) + (setup * 0.18) + (amber * 0.24) + (prem_score * 0.12) + (ann_score * 0.10) + (spread * 0.12)
+    if str(event_risk).startswith("🔴"):
+        score -= 18
+    elif str(event_risk).startswith("🟡"):
+        score -= 8
+    return int(round(_clamp(score, 0, 100)))
+
+
+def _capital_recommendation(candidate: dict | None, best_put: dict | None, event_risk: str = ""):
+    if not best_put:
+        return "PASS", "No attractive put candidate matched the safety filters."
+    score = _capital_score(candidate, best_put, event_risk)
+    risk = str(best_put.get("Assignment risk", ""))
+    if str(event_risk).startswith("🔴"):
+        return "WAIT", "High-impact scheduled event risk is close. Premium may be juicy for the wrong reason."
+    if score >= 82 and risk in ["Low", "Medium-Low", "Medium"]:
+        return "SELL PUT", "Strong premium opportunity with acceptable assignment risk and a reasonable effective entry."
+    if score >= 68:
+        return "WATCH", "Interesting premium, but not clean enough to be automatic. Confirm chart/news first."
+    return "PASS", "Premium does not justify the risk, quality, spread, or capital tie-up."
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def compute_capital_engine_single(ticker: str, profit_target: int = 8, bounce_days: int = 30, include_news_lookup: bool = True, cost_basis: float = 0.0, tax_rate_pct: float = 25.0, max_dte: int = 21):
+    """Single-ticker capital deployment analysis."""
+    res = compute_stock_verifier(ticker, profit_target, bounce_days, include_news_lookup, cost_basis, tax_rate_pct, max_dte)
+    if not res:
+        return None
+    best = (res.get("options_intel") or {}).get("best_csp")
+    res["capital_score"] = _capital_score(res.get("candidate"), best, res.get("event_risk", ""))
+    rec, reason = _capital_recommendation(res.get("candidate"), best, res.get("event_risk", ""))
+    res["capital_recommendation"] = rec
+    res["capital_reason"] = reason
+    res["assignment_sim"] = _capital_assignment_sim(best, res.get("candidate"), profit_target)
+    return res
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def compute_capital_engine_candidate(ticker: str, profit_target: int = 8, bounce_days: int = 30, include_news_lookup: bool = False, max_dte: int = 21, tax_rate_pct: float = 25.0):
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return None
+    try:
+        cand = compute_candidate(ticker, profit_target, bounce_days, include_news_lookup, "1D")
+        if not cand:
+            return None
+        price = _safe_float(cand.get("price"), None)
+        # Keep junk out: require a real price and avoid very low-priced/speculative names.
+        if not price or price < 5:
+            return None
+        # Avoid broken trend / very weak names unless they are otherwise exceptional.
+        if _safe_float(cand.get("trend_score"), 0) < 25:
+            return None
+        events = _get_important_dates(ticker)
+        event_risk, event_note = _event_risk_summary(events)
+        oi = _options_intelligence(ticker, price, cand.get("potential_sell_price"), 0.0, tax_rate_pct, max_dte)
+        best = oi.get("best_csp")
+        if not best:
+            return None
+        score = _capital_score(cand, best, event_risk)
+        if score < 55:
+            return None
+        rec, reason = _capital_recommendation(cand, best, event_risk)
+        sim = _capital_assignment_sim(best, cand, profit_target)
+        return {
+            "Ticker": ticker,
+            "Price": round(price, 2),
+            "Recommendation": rec,
+            "Capital Score": score,
+            "Best Put": f"{best.get('Strike'):g}P",
+            "Expiry": best.get("Expiry"),
+            "DTE": best.get("DTE"),
+            "Premium $": best.get("Premium $"),
+            "After-tax $": best.get("After-tax $"),
+            "Cash Needed": best.get("Cash needed"),
+            "Effective Buy": best.get("Effective buy"),
+            "Discount %": best.get("Discount"),
+            "Delta": best.get("Delta"),
+            "Assignment Risk": best.get("Assignment risk"),
+            "Return %": best.get("Return %"),
+            "Annualized %": best.get("Annualized %"),
+            "Amber Rating": best.get("Amber rating"),
+            "Trend": clean_label(cand.get("trend_label", "—"))[:22],
+            "TTM": _cc_ttm_state(cand.get("spring_label", "—")),
+            "Event Risk": event_risk,
+            "Est. Total Opportunity $": sim.get("total_opportunity"),
+            "Why": reason,
+        }
+    except Exception:
+        return None
+
+
+def render_capital_engine_workspace():
+    st.markdown("## 💰 Capital Engine")
+    st.caption("Premium hunting without chasing junk. Single-stock planning, universe scans, cash-secured puts, covered calls, assignment simulation, and capital awareness.")
+
+    with st.container(border=True):
+        mode_col, dte_col, tax_col, cash_col, reserve_col = st.columns([1.1, .8, .8, .9, .9])
+        with mode_col:
+            mode = st.radio("Mode", ["Single Stock", "Universe Scan", "Portfolio Positions"], horizontal=True, key="cap_mode")
+        with dte_col:
+            max_dte = st.selectbox("Max DTE", [7, 14, 21, 30, 45], index=2, key="cap_max_dte")
+        with tax_col:
+            tax_rate = st.number_input("Tax %", min_value=0.0, max_value=60.0, value=float(st.session_state.get("cap_tax_rate", 25.0)), step=1.0, key="cap_tax_rate")
+        with cash_col:
+            cash_available = st.number_input("Cash", min_value=0.0, value=float(st.session_state.get("cap_cash", 90000.0)), step=1000.0, key="cap_cash")
+        with reserve_col:
+            reserve_pct = st.number_input("Reserve %", min_value=0.0, max_value=90.0, value=float(st.session_state.get("cap_reserve_pct", 25.0)), step=5.0, key="cap_reserve_pct")
+
+    reserve_cash = cash_available * reserve_pct / 100.0
+    deployable_cash = max(cash_available - reserve_cash, 0)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Cash available", _fmt_money(cash_available))
+    m2.metric("Dry powder reserve", _fmt_money(reserve_cash))
+    m3.metric("Deployable for CSPs", _fmt_money(deployable_cash))
+
+    if mode == "Single Stock":
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([1, .8, .8, .8])
+            with c1:
+                ticker = st.text_input("Ticker", value=st.session_state.get("cap_last_ticker", ""), placeholder="ADSK", key="cap_single_ticker").upper().strip()
+            with c2:
+                owned_shares = st.number_input("Shares owned", min_value=0, value=int(st.session_state.get("cap_owned_shares", 0)), step=100, key="cap_owned_shares")
+            with c3:
+                cost_basis = st.number_input("Cost basis", min_value=0.0, value=float(st.session_state.get("cap_cost_basis", 0.0)), step=0.50, key="cap_cost_basis")
+            with c4:
+                run_single = st.button("💰 Analyze Capital Plan", use_container_width=True, key="cap_single_run")
+        if run_single and ticker:
+            st.session_state.cap_last_ticker = ticker
+            with st.spinner(f"Building Capital Engine plan for {ticker}…"):
+                st.session_state.cap_single_result = compute_capital_engine_single(ticker, profit_target, bounce_window, include_news, cost_basis, tax_rate, max_dte)
+        res = st.session_state.get("cap_single_result")
+        if not res:
+            st.info("Enter a ticker to see cash-secured put ideas, covered calls, assignment simulator, event risk, and a capital allocation recommendation.")
+            st.stop()
+        t = res.get("ticker")
+        cand = res.get("candidate") or {}
+        oi = res.get("options_intel") or {}
+        best = oi.get("best_csp")
+        bestc = oi.get("best_cc")
+        sim = res.get("assignment_sim") or {}
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Recommendation", res.get("capital_recommendation", "—"))
+            c2.metric("Capital Score", f"{res.get('capital_score', 0)}/100")
+            c3.metric("Amber Fit", f"{res.get('amber_fit', 0)}/100")
+            c4.metric("Current Price", _fmt_money(cand.get("price")))
+            st.caption(res.get("capital_reason", ""))
+        with st.container(border=True):
+            st.markdown("#### 💵 Best Cash-Secured Put")
+            if best:
+                a, b, c, d, e = st.columns(5)
+                a.metric("Contract", f"{best.get('Expiry')} {t} {best.get('Strike'):g}P")
+                b.metric("Premium dollars", _fmt_money(best.get("Premium $")))
+                c.metric("After-tax est.", _fmt_money(best.get("After-tax $")))
+                d.metric("Effective buy", _fmt_money(best.get("Effective buy")))
+                e.metric("Assignment risk", best.get("Assignment risk", "—"))
+                st.caption(f"Cash required {_fmt_money(best.get('Cash needed'))} · Delta {best.get('Delta')} · DTE {best.get('DTE')} · Annualized {best.get('Annualized %')}%")
+            else:
+                st.warning(oi.get("warning") or "No attractive put candidate found.")
+        if sim:
+            with st.container(border=True):
+                st.markdown("#### 🧮 Assignment Simulator")
+                a, b, c, d, e = st.columns(5)
+                a.metric("If assigned cost", _fmt_money(sim.get("effective_cost")))
+                b.metric("Premium kept", _fmt_money(sim.get("premium")))
+                c.metric("Avg recovery", _fmt_pct(sim.get("avg_recovery_pct")))
+                d.metric("Avg days", sim.get("avg_days"))
+                e.metric("Est. total opportunity", _fmt_money(sim.get("total_opportunity")))
+                st.caption("This combines premium plus the historical/goal-based swing recovery estimate. It is a planning estimate, not a guarantee.")
+        if owned_shares >= 100:
+            with st.container(border=True):
+                st.markdown("#### 📞 Covered Call Planner")
+                if bestc:
+                    a, b, c, d = st.columns(4)
+                    a.metric("Best call", f"{bestc.get('Expiry')} {t} {bestc.get('Strike'):g}C")
+                    b.metric("Premium dollars", _fmt_money(bestc.get("Premium $")))
+                    c.metric("Max profit", _fmt_money(bestc.get("Max profit $")))
+                    d.metric("Called-away risk", bestc.get("Called-away risk", "—"))
+                    st.caption(f"Delta {bestc.get('Delta')} · DTE {bestc.get('DTE')} · After-tax premium ≈ {_fmt_money(bestc.get('After-tax $'))}")
+                else:
+                    st.info("No covered call candidate found in the selected DTE range.")
+        with st.expander("All option candidates", expanded=False):
+            ptab, ctab = st.tabs(["Cash-secured puts", "Covered calls"])
+            with ptab:
+                rows = oi.get("csp_rows") or []
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No put rows returned.")
+            with ctab:
+                rows = oi.get("cc_rows") or []
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No call rows returned.")
+        st.stop()
+
+    if mode == "Universe Scan":
+        with st.container(border=True):
+            st.markdown("#### Universe Premium Scan")
+            st.caption("Ranks safer, higher-quality premium opportunities by actual dollars, effective entry, assignment risk, event risk, and capital efficiency — not raw premium alone.")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                max_scan = st.selectbox("Deep option candidates", [25, 50, 75, 100, 150], index=1, key="cap_deep_n")
+            with c2:
+                min_score = st.selectbox("Min Capital Score", [50, 60, 70, 80], index=1, key="cap_min_score")
+            with c3:
+                only_no_earnings = st.toggle("Avoid high event risk", value=True, key="cap_avoid_event")
+            with c4:
+                run_universe = st.button("🔎 Scan Premium Opportunities", use_container_width=True, key="cap_universe_run")
+        if run_universe:
+            universe_text = custom_input
+            if universe == "📂 CSV upload":
+                uploaded_tickers = parse_uploaded_tickers(csv_uploaded)
+                universe_text = ",".join(uploaded_tickers)
+            tickers, source_map = get_universe_payload(universe, universe_text)
+            if not tickers:
+                st.warning("No tickers found. Choose a universe or enter a custom list.")
+                st.stop()
+            progress = st.progress(0)
+            status = st.empty()
+            st.info(f"Capital Engine fast pass on {len(tickers):,} tickers from {universe}…")
+            prescreen = []
+            completed = 0
+            with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
+                futs = {executor.submit(compute_prescreen_candidate, t, profit_target, bounce_window): t for t in tickers}
+                for fut in as_completed(futs):
+                    completed += 1
+                    t = futs[fut]
+                    try:
+                        r = fut.result()
+                    except Exception:
+                        r = None
+                    if r and _safe_float(r.get("price"), 0) >= 5 and _safe_float(r.get("fast_score"), 0) > 20:
+                        prescreen.append(r)
+                    progress.progress(min((completed / max(len(tickers), 1)) * 0.45, 0.45))
+                    if completed % 75 == 0 or completed == len(tickers):
+                        status.caption(f"Fast pass {completed:,}/{len(tickers):,} · candidates {len(prescreen):,}")
+            leaders = sorted(prescreen, key=lambda x: _safe_float(x.get("fast_score"), 0), reverse=True)[:int(max_scan)]
+            deep_tickers = [r.get("ticker") for r in leaders if r.get("ticker")]
+            results = []
+            completed = 0
+            if deep_tickers:
+                st.info(f"Option analysis on top {len(deep_tickers)} candidates…")
+                with ThreadPoolExecutor(max_workers=min(int(max_workers), 8)) as executor:
+                    futs = {executor.submit(compute_capital_engine_candidate, t, profit_target, bounce_window, False, max_dte, tax_rate): t for t in deep_tickers}
+                    for fut in as_completed(futs):
+                        completed += 1
+                        t = futs[fut]
+                        try:
+                            r = fut.result()
+                        except Exception:
+                            r = None
+                        if r:
+                            if _safe_float(r.get("Capital Score"), 0) >= float(min_score):
+                                if not (only_no_earnings and str(r.get("Event Risk", "")).startswith("🔴")):
+                                    results.append(r)
+                        progress.progress(min(0.45 + (completed / max(len(deep_tickers), 1)) * 0.55, 1.0))
+                        status.caption(f"Options pass {completed:,}/{len(deep_tickers):,} · usable {len(results):,}")
+            progress.empty(); status.empty()
+            st.session_state.cap_universe_results = sorted(results, key=lambda x: _safe_float(x.get("Capital Score"), 0), reverse=True)
+            st.session_state.cap_universe_meta = {"universe": universe, "scanned": len(tickers), "analyzed": len(deep_tickers), "run_date": datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")}
+        rows = st.session_state.get("cap_universe_results") or []
+        meta = st.session_state.get("cap_universe_meta") or {}
+        if not rows:
+            st.info("Run a universe scan to find premium opportunities that fit the Amber-style capital allocation rules.")
+            st.stop()
+        st.success(f"Found {len(rows)} premium opportunities · scanned {meta.get('scanned', '—')} · option-analyzed {meta.get('analyzed', '—')} · {meta.get('run_date', '')}")
+        df = pd.DataFrame(rows)
+        show_cols = ["Ticker", "Price", "Recommendation", "Capital Score", "Best Put", "Expiry", "DTE", "Premium $", "After-tax $", "Cash Needed", "Effective Buy", "Discount %", "Delta", "Assignment Risk", "Return %", "Annualized %", "Amber Rating", "Trend", "TTM", "Event Risk", "Est. Total Opportunity $", "Why"]
+        st.dataframe(df[[c for c in show_cols if c in df.columns]], use_container_width=True, hide_index=True)
+        selected = st.selectbox("Open single-stock plan", df["Ticker"].tolist(), key="cap_open_plan")
+        if selected:
+            if st.button(f"Open {selected} in Single Stock mode", key="cap_open_single"):
+                st.session_state.cap_single_ticker = selected
+                st.session_state.cap_mode = "Single Stock"
+                st.rerun()
+        st.stop()
+
+    if mode == "Portfolio Positions":
+        st.info("Portfolio-position mode is reserved for the next step: reading your tracked positions and suggesting covered calls only where the target exit and premium both make sense.")
+        st.stop()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main UI — stateful so ticker dropdowns/sorting do NOT wipe scan results
 # ──────────────────────────────────────────────────────────────────────────────
 
+
+
+# Capital Engine workspace short-circuits all scanner UI.
+if st.session_state.get("workspace_selector") == "💰 Capital Engine":
+    render_capital_engine_workspace()
+    st.stop()
 
 # Stock Verifier workspace short-circuits all scanner UI.
 if st.session_state.get("workspace_selector") == "🔎 Stock Verifier":
