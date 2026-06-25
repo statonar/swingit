@@ -35,7 +35,7 @@ st.set_page_config(
     page_title="SwingIt V17",
     page_icon="🔥",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 st.markdown(
@@ -462,130 +462,93 @@ else:
     st.session_state.setdefault("ranking_mode_selector", current_profile_settings.get("default_view_by", APP_DEFAULT_SETTINGS["default_view_by"]))
     st.session_state.setdefault("candidate_gate_mode", current_profile_settings.get("default_candidate_gate", APP_DEFAULT_SETTINGS["default_candidate_gate"]))
 
-with st.container(border=True):
-    top_title_col, top_workspace_col, top_universe_col, top_profile_settings_col, top_model_col, top_run_col = st.columns(
-        [1.05, 1.05, 1.85, 1.25, 1.45, 1.05],
-        vertical_alignment="center",
+# ──────────────────────────────────────────────────────────────────────────────
+# V17 left navigation rail + app controls
+# ──────────────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown(
+        """
+        <div class="sidebar-brand">Swing<span>IT</span> V17</div>
+        <div class="sidebar-subtitle">Capital First</div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    with top_title_col:
-        st.markdown(
-            """
-            <div class="terminal-title">Swing<span style="color:#8cff5a">IT</span> V17</div>
-            <div class="terminal-subtitle">Capital First · fewer, higher-conviction ideas.</div>
-            """,
-            unsafe_allow_html=True,
-        )
+    workspace = st.radio(
+        "Workspace",
+        ["⭐ Command Center", "📊 Dashboard", "🔎 Stock Verifier", "💰 Capital Engine", "⚡ Entry Hunter", "☀️ Morning Drop Afternoon Pop", "🔥 Scanner", "👑 My Portfolio", "📰 News", "📅 Earnings Calendar", "⚙️ Settings"],
+        index=0,
+        key="workspace_selector",
+        label_visibility="collapsed",
+    )
 
-    with top_workspace_col:
-        st.markdown("<div class='toolbar-label'>Workspace</div>", unsafe_allow_html=True)
-        workspace = st.selectbox(
-            "Workspace",
-            ["⭐ Command Center", "🔎 Stock Verifier", "💰 Capital Engine", "⚡ Entry Hunter", "☀️ Morning Drop Afternoon Pop", "🔥 Scanner", "👑 My Portfolio"],
-            index=0,
-            label_visibility="collapsed",
-            key="workspace_selector",
-            help="Command Center is the clean discovery view. Specialist workspaces are still available.",
-        )
-        st.markdown("<div class='toolbar-help'>Discover, verify, deploy, enter, manage</div>", unsafe_allow_html=True)
+    st.markdown("---")
+    universe = st.selectbox(
+        "Universe",
+        UNIVERSE_OPTIONS,
+        index=UNIVERSE_OPTIONS.index(st.session_state.top_universe) if st.session_state.get("top_universe") in UNIVERSE_OPTIONS else 0,
+        help="Choose the group to scan. The app scans the full selected universe by default.",
+        key="top_universe",
+    )
+    st.caption(UNIVERSE_HINTS.get(universe, ""))
 
-    with top_universe_col:
-        st.markdown("<div class='toolbar-label'>Universe</div>", unsafe_allow_html=True)
-        universe = st.selectbox(
-            "Universe",
+    with st.expander("👤 Profile defaults", expanded=False):
+        st.caption("Saved app defaults. These load automatically when SwingIt starts.")
+        ps_universe = st.selectbox(
+            "Default universe",
             UNIVERSE_OPTIONS,
-            index=UNIVERSE_OPTIONS.index(st.session_state.top_universe) if st.session_state.get("top_universe") in UNIVERSE_OPTIONS else 0,
-            label_visibility="collapsed",
-            help="Choose the group to scan. The app scans the full selected universe by default.",
-            key="top_universe",
+            index=UNIVERSE_OPTIONS.index(current_profile_settings.get("default_universe", APP_DEFAULT_SETTINGS["default_universe"])) if current_profile_settings.get("default_universe") in UNIVERSE_OPTIONS else 0,
+            key="profile_default_universe",
         )
-        st.markdown(f"<div class='toolbar-help'>{html.escape(UNIVERSE_HINTS.get(universe, ''))}</div>", unsafe_allow_html=True)
-
-    with top_profile_settings_col:
-        st.markdown("<div class='toolbar-label'>Profile Settings</div>", unsafe_allow_html=True)
-        with st.popover("👤 Defaults", use_container_width=True):
-            st.caption("Saved app defaults. These load automatically when SwingIt starts.")
-            ps_universe = st.selectbox(
-                "Default universe",
-                UNIVERSE_OPTIONS,
-                index=UNIVERSE_OPTIONS.index(current_profile_settings.get("default_universe", APP_DEFAULT_SETTINGS["default_universe"])) if current_profile_settings.get("default_universe") in UNIVERSE_OPTIONS else 0,
-                help="Which universe should appear first?",
-                key="profile_default_universe",
-            )
-            ps_view_by = st.selectbox(
-                "Default View By",
-                APP_VIEW_BY_OPTIONS,
-                index=APP_VIEW_BY_OPTIONS.index(current_profile_settings.get("default_view_by", APP_DEFAULT_SETTINGS["default_view_by"])) if current_profile_settings.get("default_view_by") in APP_VIEW_BY_OPTIONS else 0,
-                help="Which ranking lens should SwingIt start with?",
-                key="profile_default_view_by",
-            )
-            ps_gate = st.selectbox(
-                "Default Candidate Quality Gate",
-                APP_CANDIDATE_GATE_OPTIONS,
-                index=APP_CANDIDATE_GATE_OPTIONS.index(current_profile_settings.get("default_candidate_gate", APP_DEFAULT_SETTINGS["default_candidate_gate"])) if current_profile_settings.get("default_candidate_gate") in APP_CANDIDATE_GATE_OPTIONS else 0,
-                help="How strict should the Top Qualified Opportunities cards be by default?",
-                key="profile_default_gate",
-            )
-            if st.button("💾 Save defaults", use_container_width=True, key="save_profile_defaults"):
-                save_app_settings({
-                    "default_universe": ps_universe,
-                    "default_view_by": ps_view_by,
-                    "default_candidate_gate": ps_gate,
-                })
-                st.session_state.force_profile_defaults = True
-                st.success("Saved. Reloading with the new defaults…")
-                st.rerun()
-        default_summary = f"{current_profile_settings.get('default_view_by', '🎯 8% Target Hunter').split(' ', 1)[0]} · {current_profile_settings.get('default_candidate_gate', 'Balanced')}"
-        st.markdown(f"<div class='toolbar-help'>Defaults: {html.escape(default_summary)}</div>", unsafe_allow_html=True)
-
-    with top_model_col:
-        st.markdown("<div class='toolbar-label'>Model Settings</div>", unsafe_allow_html=True)
-        with st.popover("⚙️ Configure", use_container_width=True):
-            profit_target = st.select_slider(
-                "Profit goal",
-                options=[5, 8, 10, 12, 15, 20],
-                value=8,
-                help="A historical RSI panic event counts as useful if it reached this max closing-price bounce within the selected window."
-            )
-            bounce_window = st.select_slider(
-                "Swing window",
-                options=[10, 15, 20, 30, 45, 60],
-                value=30,
-                help="Trading days after the oversold low to measure the best closing-price bounce."
-            )
-            spring_timeframe = st.selectbox(
-                "TTM timeframe",
-                ["1D", "1H"],
-                index=0,
-                help="1D is better for 1–4 week swing context. 1H is better for near-term timing/watchlist urgency."
-            )
-            include_news = st.toggle(
-                "News/catalyst score",
-                value=True,
-                help="Adds lightweight Yahoo Finance headline scoring. Turn off if a large scan feels slow."
-            )
-            deep_scan_top_n = st.select_slider(
-                "Deep scan candidates",
-                options=[50, 100, 150, 200, 300, 500],
-                value=150,
-                help="Fast Scan checks the full universe with daily data first, then runs expensive 4H/news analysis only on the best candidates. Raise this for broader coverage; lower it for speed."
-            )
-            max_workers = st.select_slider(
-                "Scan speed",
-                options=[1, 4, 8, 12, 16],
-                value=8,
-                help="Higher = faster, but very high settings may trigger data-provider hiccups on huge universes."
-            )
-        st.markdown(
-            f"<div class='toolbar-help'>Goal {profit_target}% · {bounce_window}d · TTM {spring_timeframe}</div>",
-            unsafe_allow_html=True,
+        ps_view_by = st.selectbox(
+            "Default View By",
+            APP_VIEW_BY_OPTIONS,
+            index=APP_VIEW_BY_OPTIONS.index(current_profile_settings.get("default_view_by", APP_DEFAULT_SETTINGS["default_view_by"])) if current_profile_settings.get("default_view_by") in APP_VIEW_BY_OPTIONS else 0,
+            key="profile_default_view_by",
         )
+        ps_gate = st.selectbox(
+            "Default Candidate Gate",
+            APP_CANDIDATE_GATE_OPTIONS,
+            index=APP_CANDIDATE_GATE_OPTIONS.index(current_profile_settings.get("default_candidate_gate", APP_DEFAULT_SETTINGS["default_candidate_gate"])) if current_profile_settings.get("default_candidate_gate") in APP_CANDIDATE_GATE_OPTIONS else 0,
+            key="profile_default_gate",
+        )
+        if st.button("💾 Save defaults", use_container_width=True, key="save_profile_defaults"):
+            save_app_settings({
+                "default_universe": ps_universe,
+                "default_view_by": ps_view_by,
+                "default_candidate_gate": ps_gate,
+            })
+            st.session_state.force_profile_defaults = True
+            st.success("Saved. Reloading with the new defaults…")
+            st.rerun()
 
-    with top_run_col:
-        st.markdown("<div class='toolbar-label'>&nbsp;</div>", unsafe_allow_html=True)
-        run_label = "⭐ Build Command Center" if st.session_state.get("workspace_selector") == "⭐ Command Center" else ("🔎 Verify Ticker" if st.session_state.get("workspace_selector") == "🔎 Stock Verifier" else ("💰 Open Capital Engine" if st.session_state.get("workspace_selector") == "💰 Capital Engine" else ("⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else ("☀️ Run 11AM Pop Scan" if st.session_state.get("workspace_selector") == "☀️ Morning Drop Afternoon Pop" else "🚀 Run Swing Scan"))))
-        run = st.button(run_label, use_container_width=True, disabled=(st.session_state.get("workspace_selector") in ["👑 My Portfolio", "🔎 Stock Verifier", "💰 Capital Engine"]))
-        st.markdown("<div class='run-note'>Use ToS for entries/exits.</div>", unsafe_allow_html=True)
+    with st.expander("⚙️ Model settings", expanded=False):
+        profit_target = st.select_slider("Profit goal", options=[5, 8, 10, 12, 15, 20], value=8)
+        bounce_window = st.select_slider("Swing window", options=[10, 15, 20, 30, 45, 60], value=30)
+        spring_timeframe = st.selectbox("TTM timeframe", ["1D", "1H"], index=0)
+        include_news = st.toggle("News/catalyst score", value=True)
+        deep_scan_top_n = st.select_slider("Deep scan candidates", options=[50, 100, 150, 200, 300, 500], value=150)
+        max_workers = st.select_slider("Scan speed", options=[1, 4, 8, 12, 16], value=8)
+
+    run_label = "⭐ Build Command Center" if st.session_state.get("workspace_selector") == "⭐ Command Center" else ("🔎 Verify Ticker" if st.session_state.get("workspace_selector") == "🔎 Stock Verifier" else ("💰 Open Capital Engine" if st.session_state.get("workspace_selector") == "💰 Capital Engine" else ("⚡ Run Entry Hunt" if st.session_state.get("workspace_selector") == "⚡ Entry Hunter" else ("☀️ Run 11AM Pop Scan" if st.session_state.get("workspace_selector") == "☀️ Morning Drop Afternoon Pop" else "🚀 Run Swing Scan"))))
+    run = st.button(run_label, use_container_width=True, disabled=(st.session_state.get("workspace_selector") in ["👑 My Portfolio", "🔎 Stock Verifier", "💰 Capital Engine", "📊 Dashboard", "📰 News", "📅 Earnings Calendar", "⚙️ Settings"]))
+
+    st.markdown(
+        """
+        <div class="sidebar-card">
+            <div class="title">Market Status</div>
+            <div class="sidebar-green">● Market Open</div>
+            <div style="font-size:.82rem;color:#9fb0c4;margin-top:4px;">Use ToS for entries/exits.</div>
+        </div>
+        <div class="sidebar-card">
+            <div class="title">Dry Powder</div>
+            <div class="dry-gauge"><div></div></div>
+            <div style="font-size:1.5rem;font-weight:950;">64%</div>
+            <div style="font-size:.82rem;color:#9fb0c4;">Set this later in Capital Engine.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 if universe == "Custom list":
     custom_input = st.text_area(
@@ -602,6 +565,8 @@ elif universe == "📂 CSV upload":
         help="Upload a CSV with a Ticker/Symbol column, or a one-column ticker list.",
         key="top_csv_upload",
     )
+
+st.markdown("---")
 
 # Single-user mode: Favorites and Morning Report storage are app-level.
 ACTIVE_PROFILE = "Amber"
